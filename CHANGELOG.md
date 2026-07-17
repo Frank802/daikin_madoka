@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.0 - July 2026
+
+### Daikin VAM (ventilation) support
+
+- **New: ventilation units (VAM / HRV).** Both integrations now support Daikin VAM units — ventilation-only indoor units driven by the same BRC1H controller over the same BLE protocol (operation mode 5 = VENTILATION, no temperature setpoint).
+  - **HA integration**: the config flow now asks for the **appliance type** (*thermostat* or *ventilation*). A ventilation device exposes an **Off / Fan only** climate entity with fan-speed control and indoor/outdoor temperature — no target temperature.
+  - **ESPHome**: new dedicated **`madoka_vam`** platform (Off / Fan only, fan LOW/MEDIUM/HIGH/AUTO, current temperature, optional `outdoor_temperature` and `firmware_version`).
+- **Reverse-engineering tooling** to map VAM-specific features later: a `dump_raw` option on `madoka_vam` (hex-logs every BLE frame and any unhandled function ID), a public `send_raw_command()` probe callable from a lambda, and a capture guide at [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md).
+
 ## v3.1.0 - July 2026
 
 ### Madoka Card

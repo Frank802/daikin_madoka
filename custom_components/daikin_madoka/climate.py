@@ -25,7 +25,15 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 
-from .const import COORDINATORS, DOMAIN, MAX_TEMP, MIN_TEMP
+from .const import (
+    COORDINATORS,
+    DEFAULT_DEVICE_TYPE,
+    DEVICE_TYPE_VENTILATION,
+    CONF_DEVICE_TYPE,
+    DOMAIN,
+    MAX_TEMP,
+    MIN_TEMP,
+)
 from .entity import MadokaEntity
 
 HA_MODE_TO_DAIKIN = {
@@ -44,6 +52,20 @@ DAIKIN_TO_HA_MODE = {
     OperationModeEnum.HEAT: HVACMode.HEAT,
     OperationModeEnum.AUTO: HVACMode.AUTO,
 }
+
+# A VAM (ventilation-only) unit reports/accepts operation mode VENTILATION and
+# exposes just OFF + FAN_ONLY. FAN_ONLY must map to VENTILATION here (not FAN, as
+# a thermostat does), which is why the write mapping is per-device-type.
+HA_MODE_TO_DAIKIN_VENTILATION = {
+    HVACMode.FAN_ONLY: OperationModeEnum.VENTILATION,
+    HVACMode.OFF: OperationModeEnum.VENTILATION,
+}
+
+DAIKIN_TO_HA_MODE_VENTILATION = {
+    OperationModeEnum.VENTILATION: HVACMode.FAN_ONLY,
+}
+
+VENTILATION_HVAC_MODES = [HVACMode.OFF, HVACMode.FAN_ONLY]
 
 HA_FAN_MODE_TO_DAIKIN = {
     FAN_LOW: FanSpeedEnum.LOW,
@@ -64,14 +86,17 @@ DAIKIN_TO_HA_CURRENT_HVAC_MODE = {
     OperationModeEnum.DRY: HVACAction.DRYING,
     OperationModeEnum.COOL: HVACAction.COOLING,
     OperationModeEnum.HEAT: HVACAction.HEATING,
+    OperationModeEnum.VENTILATION: HVACAction.FAN,
 }
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up Daikin climate based on config_entry."""
     coordinators = hass.data[DOMAIN][entry.entry_id][COORDINATORS]
+    device_type = entry.data.get(CONF_DEVICE_TYPE, DEFAULT_DEVICE_TYPE)
     async_add_entities(
-        DaikinMadokaClimate(coordinator) for coordinator in coordinators.values()
+        DaikinMadokaClimate(coordinator, device_type)
+        for coordinator in coordinators.values()
     )
 
 
@@ -81,8 +106,20 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
     _attr_name = None
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = 1
-    _attr_hvac_modes = list(HA_MODE_TO_DAIKIN)
     _attr_fan_modes = list(HA_FAN_MODE_TO_DAIKIN)
+
+    def __init__(self, coordinator, device_type: str = DEFAULT_DEVICE_TYPE) -> None:
+        """Initialize; a ventilation (VAM) unit exposes only OFF + FAN_ONLY."""
+        super().__init__(coordinator)
+        self._is_ventilation = device_type == DEVICE_TYPE_VENTILATION
+        if self._is_ventilation:
+            self._attr_hvac_modes = VENTILATION_HVAC_MODES
+            self._mode_to_daikin = HA_MODE_TO_DAIKIN_VENTILATION
+            self._daikin_to_mode = DAIKIN_TO_HA_MODE_VENTILATION
+        else:
+            self._attr_hvac_modes = list(HA_MODE_TO_DAIKIN)
+            self._mode_to_daikin = HA_MODE_TO_DAIKIN
+            self._daikin_to_mode = DAIKIN_TO_HA_MODE
 
     @property
     def _set_point(self):
@@ -105,6 +142,9 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
             | ClimateEntityFeature.TURN_ON
             | ClimateEntityFeature.TURN_OFF
         )
+        # A ventilation (VAM) unit has no temperature setpoint.
+        if self._is_ventilation:
+            return features
         if self._range_active:
             features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         else:
@@ -121,6 +161,8 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
+        if self._is_ventilation:
+            return None
         if self._set_point is None or self._range_active:
             return None
         if self.hvac_mode == HVACMode.HEAT:
@@ -175,6 +217,8 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature (single setpoint or AUTO range)."""
+        if self._is_ventilation:
+            return
         if self._set_point is None or self.controller.operation_mode.status is None:
             return
 
@@ -214,7 +258,7 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
         if self.controller.power_state.status.turn_on is False:
             return HVACMode.OFF
 
-        return DAIKIN_TO_HA_MODE.get(
+        return self._daikin_to_mode.get(
             self.controller.operation_mode.status.operation_mode
         )
 
@@ -262,7 +306,7 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
         if hvac_mode != HVACMode.OFF:
             calls.append(
                 lambda: self.controller.operation_mode.update(
-                    OperationModeStatus(HA_MODE_TO_DAIKIN.get(hvac_mode))
+                    OperationModeStatus(self._mode_to_daikin.get(hvac_mode))
                 )
             )
         calls.append(

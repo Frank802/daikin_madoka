@@ -1,4 +1,12 @@
 {
+  "selector": {
+    "device_type": {
+      "options": {
+        "thermostat": "Termostato (calefacción / refrigeración)",
+        "ventilation": "Solo ventilación (VAM / HRV)"
+      }
+    }
+  },
   "config": {
     "flow_title": "{name}",
     "abort": {
@@ -14,14 +22,16 @@
         "description": "Elige un termostato BRC1H descubierto o introduce su dirección MAC Bluetooth. Ejecuta este flujo de nuevo para añadir más termostatos.\n\nEl dispositivo debe estar emparejado con el host de Home Assistant (o accesible a través de un proxy Bluetooth ESPHome). Consulta la documentación para los pasos de emparejamiento.",
         "data": {
           "address": "Termostato BRC1H",
-          "friendly_name": "Nombre descriptivo (opcional, p. ej. 'Salón')"
+          "friendly_name": "Nombre descriptivo (opcional, p. ej. 'Salón')",
+          "device_type": "Tipo de aparato"
         }
       },
       "bluetooth_confirm": {
         "title": "Termostato Daikin Madoka encontrado",
         "description": "¿Añadir {name} a Home Assistant?",
         "data": {
-          "friendly_name": "Nombre descriptivo (opcional, p. ej. 'Salón')"
+          "friendly_name": "Nombre descriptivo (opcional, p. ej. 'Salón')",
+          "device_type": "Tipo de aparato"
         }
       }
     }

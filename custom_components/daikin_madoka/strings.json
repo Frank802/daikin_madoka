@@ -1,4 +1,12 @@
 {
+  "selector": {
+    "device_type": {
+      "options": {
+        "thermostat": "Thermostat (heating / cooling)",
+        "ventilation": "Ventilation only (VAM / HRV)"
+      }
+    }
+  },
   "config": {
     "flow_title": "{name}",
     "abort": {
@@ -14,14 +22,16 @@
         "description": "Pick a discovered BRC1H thermostat or enter its Bluetooth MAC address. Run this flow again to add additional thermostats.\n\nThe device must be paired with the Home Assistant host (or reachable through an ESPHome Bluetooth proxy). See the documentation for pairing steps.",
         "data": {
           "address": "BRC1H thermostat",
-          "friendly_name": "Friendly name (optional, e.g. 'Living room')"
+          "friendly_name": "Friendly name (optional, e.g. 'Living room')",
+          "device_type": "Appliance type"
         }
       },
       "bluetooth_confirm": {
         "title": "Daikin Madoka thermostat found",
         "description": "Add {name} to Home Assistant?",
         "data": {
-          "friendly_name": "Friendly name (optional, e.g. 'Living room')"
+          "friendly_name": "Friendly name (optional, e.g. 'Living room')",
+          "device_type": "Appliance type"
         }
       }
     }

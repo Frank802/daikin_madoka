@@ -24,13 +24,28 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     BRC1H_NAME_PREFIX,
+    CONF_DEVICE_TYPE,
     CONF_FRIENDLY_NAME,
     CONF_MAC,
+    DEFAULT_DEVICE_TYPE,
+    DEVICE_TYPE_THERMOSTAT,
+    DEVICE_TYPE_VENTILATION,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MADOKA_SERVICE_UUID,
 )
 from .util import normalize_mac
+
+
+def _device_type_selector() -> SelectSelector:
+    """Selector for the appliance type (thermostat vs ventilation/VAM)."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[DEVICE_TYPE_THERMOSTAT, DEVICE_TYPE_VENTILATION],
+            translation_key="device_type",
+            mode=SelectSelectorMode.LIST,
+        )
+    )
 
 
 class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -79,10 +94,15 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 ),
                 vol.Optional(CONF_FRIENDLY_NAME, default=""): str,
+                vol.Required(
+                    CONF_DEVICE_TYPE, default=DEFAULT_DEVICE_TYPE
+                ): _device_type_selector(),
             }
         )
 
-    async def _create_entry(self, mac: str, friendly_name: str) -> ConfigFlowResult:
+    async def _create_entry(
+        self, mac: str, friendly_name: str, device_type: str = DEFAULT_DEVICE_TYPE
+    ) -> ConfigFlowResult:
         """Register new entry."""
         title = friendly_name.strip() or f"{BRC1H_NAME_PREFIX} {mac}"
         return self.async_create_entry(
@@ -90,6 +110,7 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data={
                 CONF_MAC: mac,
                 CONF_FRIENDLY_NAME: friendly_name.strip(),
+                CONF_DEVICE_TYPE: device_type,
             },
         )
 
@@ -120,11 +141,19 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             return await self._create_entry(
                 self._discovery_info.address.upper(),
                 user_input.get(CONF_FRIENDLY_NAME, ""),
+                user_input.get(CONF_DEVICE_TYPE, DEFAULT_DEVICE_TYPE),
             )
 
         return self.async_show_form(
             step_id="bluetooth_confirm",
-            data_schema=vol.Schema({vol.Optional(CONF_FRIENDLY_NAME, default=""): str}),
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_FRIENDLY_NAME, default=""): str,
+                    vol.Required(
+                        CONF_DEVICE_TYPE, default=DEFAULT_DEVICE_TYPE
+                    ): _device_type_selector(),
+                }
+            ),
             description_placeholders={
                 "name": self._discovery_info.name or self._discovery_info.address
             },
@@ -149,6 +178,7 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self._create_entry(
                     mac,
                     user_input.get(CONF_FRIENDLY_NAME, ""),
+                    user_input.get(CONF_DEVICE_TYPE, DEFAULT_DEVICE_TYPE),
                 )
 
         return self.async_show_form(
