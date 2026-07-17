@@ -1,13 +1,17 @@
 import esphome.codegen as cg
 from esphome.components import (
+    binary_sensor,
     ble_client,
+    button,
     climate,
+    number,
     sensor,
     text_sensor,
 )
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
+    DEVICE_CLASS_PROBLEM,
     DEVICE_CLASS_TEMPERATURE,
     STATE_CLASS_MEASUREMENT,
     UNIT_CELSIUS,
@@ -15,15 +19,23 @@ from esphome.const import (
 
 CODEOWNERS = ["@Frank802"]
 DEPENDENCIES = ["ble_client"]
-AUTO_LOAD = ["sensor", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "number", "sensor", "text_sensor"]
 
 CONF_OUTDOOR_TEMPERATURE = "outdoor_temperature"
+CONF_CLEAN_FILTER = "clean_filter"
 CONF_FIRMWARE_VERSION = "firmware_version"
-CONF_DUMP_RAW = "dump_raw"
+CONF_EYE_BRIGHTNESS = "eye_brightness"
+CONF_RESET_FILTER = "reset_filter"
 
 madoka_vam_ns = cg.esphome_ns.namespace("madoka_vam")
 MadokaVam = madoka_vam_ns.class_(
     "MadokaVam", climate.Climate, ble_client.BLEClientNode, cg.PollingComponent
+)
+MadokaEyeBrightnessNumber = madoka_vam_ns.class_(
+    "MadokaEyeBrightnessNumber", number.Number, cg.Parented.template(MadokaVam)
+)
+MadokaResetFilterButton = madoka_vam_ns.class_(
+    "MadokaResetFilterButton", button.Button, cg.Parented.template(MadokaVam)
 )
 
 CONFIG_SCHEMA = (
@@ -38,12 +50,21 @@ CONFIG_SCHEMA = (
                 device_class=DEVICE_CLASS_TEMPERATURE,
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
+            cv.Optional(CONF_CLEAN_FILTER): binary_sensor.binary_sensor_schema(
+                device_class=DEVICE_CLASS_PROBLEM,
+                icon="mdi:air-filter",
+            ),
             cv.Optional(CONF_FIRMWARE_VERSION): text_sensor.text_sensor_schema(
                 icon="mdi:chip",
             ),
-            # Journalise en hexadécimal chaque trame BLE échangée : aide au
-            # reverse engineering des fonctions spécifiques au VAM.
-            cv.Optional(CONF_DUMP_RAW, default=False): cv.boolean,
+            cv.Optional(CONF_EYE_BRIGHTNESS): number.number_schema(
+                MadokaEyeBrightnessNumber,
+                icon="mdi:brightness-6",
+            ),
+            cv.Optional(CONF_RESET_FILTER): button.button_schema(
+                MadokaResetFilterButton,
+                icon="mdi:air-filter",
+            ),
         }
     )
 )
@@ -55,12 +76,24 @@ async def to_code(config):
     await climate.register_climate(var, config)
     await ble_client.register_ble_node(var, config)
 
-    cg.add(var.set_dump_raw(config[CONF_DUMP_RAW]))
-
     if conf := config.get(CONF_OUTDOOR_TEMPERATURE):
         outdoor_sensor = await sensor.new_sensor(conf)
         cg.add(var.set_outdoor_temperature_sensor(outdoor_sensor))
 
+    if conf := config.get(CONF_CLEAN_FILTER):
+        clean_filter_sensor = await binary_sensor.new_binary_sensor(conf)
+        cg.add(var.set_clean_filter_binary_sensor(clean_filter_sensor))
+
     if conf := config.get(CONF_FIRMWARE_VERSION):
         firmware_sensor = await text_sensor.new_text_sensor(conf)
         cg.add(var.set_firmware_version_text_sensor(firmware_sensor))
+
+    if conf := config.get(CONF_EYE_BRIGHTNESS):
+        brightness_number = await number.new_number(conf, min_value=0, max_value=19, step=1)
+        cg.add(brightness_number.set_parent(var))
+        cg.add(var.set_eye_brightness_number(brightness_number))
+
+    if conf := config.get(CONF_RESET_FILTER):
+        reset_button = await button.new_button(conf)
+        cg.add(reset_button.set_parent(var))
+        cg.add(var.set_reset_filter_button(reset_button))

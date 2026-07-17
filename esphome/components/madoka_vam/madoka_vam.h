@@ -6,9 +6,12 @@
 #include <string>
 
 #include "esphome/core/component.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/ble_client/ble_client.h"
-#include "esphome/components/climate/climate.h"
+#include "esphome/components/button/button.h"
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
+#include "esphome/components/climate/climate.h"
+#include "esphome/components/number/number.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
@@ -22,28 +25,45 @@ static const uint8_t BLE_SEND_MAX_RETRIES = 5;
 namespace esphome {
 namespace madoka_vam {
 
-namespace espbt = esphome::esp32_ble_tracker;
+class MadokaVam;
 
-// Service et caractéristiques BLE du contrôleur BRC1H (identiques pour un VAM :
-// le VAM est piloté par le même contrôleur, sur le même service).
-//  - MADOKA_SERVICE_UUID : service de gestion de l'unité (VAM)
-//  - NOTIFY_CHARACTERISTIC_UUID : notifications (RX, réponses du contrôleur)
-//  - WWR_CHARACTERISTIC_UUID : write-without-response (TX, requêtes)
-static const espbt::ESPBTUUID MADOKA_SERVICE_UUID =
-    espbt::ESPBTUUID::from_raw("2141e110-213a-11e6-b67b-9e71128cae77");
-static const espbt::ESPBTUUID NOTIFY_CHARACTERISTIC_UUID =
-    espbt::ESPBTUUID::from_raw("2141e111-213a-11e6-b67b-9e71128cae77");
-static const espbt::ESPBTUUID WWR_CHARACTERISTIC_UUID =
-    espbt::ESPBTUUID::from_raw("2141e112-213a-11e6-b67b-9e71128cae77");
+class MadokaEyeBrightnessNumber : public number::Number, public Parented<MadokaVam> {
+ public:
+  void control(float value) override;
+};
 
-// Mode d'opération renvoyé/attendu par le VAM : 5 = VENTILATION (voir
-// blafois Daikin-Madoka reverse : fonction 0x0030, argument 0x20).
-static const uint8_t OPERATION_MODE_VENTILATION = 5;
+class MadokaResetFilterButton : public button::Button, public Parented<MadokaVam> {
+ public:
+  void press_action() override;
+};
+
+struct Setpoint {
+  uint16_t cooling;
+  uint16_t heating;
+};
+
+struct FanSpeed {
+  uint8_t cooling;
+  uint8_t heating;
+};
+
+struct SensorReading {
+  uint8_t indoor;
+  uint8_t outdoor;
+};
 
 struct Status {
   bool status;
   uint8_t mode;
 };
+
+namespace espbt = esphome::esp32_ble_tracker;
+
+static const espbt::ESPBTUUID MADOKA_SERVICE_UUID = espbt::ESPBTUUID::from_raw("2141e110-213a-11e6-b67b-9e71128cae77");
+static const espbt::ESPBTUUID NOTIFY_CHARACTERISTIC_UUID =
+    espbt::ESPBTUUID::from_raw("2141e111-213a-11e6-b67b-9e71128cae77");
+static const espbt::ESPBTUUID WWR_CHARACTERISTIC_UUID =
+    espbt::ESPBTUUID::from_raw("2141e112-213a-11e6-b67b-9e71128cae77");
 
 class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClientNode, public PollingComponent {
  protected:
@@ -54,17 +74,17 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
   uint16_t wwr_handle_;
   SemaphoreHandle_t receive_semaphore_ = nullptr;
   Status cur_status_;
-  // Journalisation brute des trames BLE (aide au reverse engineering du VAM).
-  bool dump_raw_ = false;
   sensor::Sensor *outdoor_temperature_sensor_{nullptr};
+  binary_sensor::BinarySensor *clean_filter_binary_sensor_{nullptr};
   text_sensor::TextSensor *firmware_version_text_sensor_{nullptr};
+  number::Number *eye_brightness_number_{nullptr};
+  button::Button *reset_filter_button_{nullptr};
 
   std::vector<std::vector<uint8_t>> split_payload_(std::vector<uint8_t> msg);
   std::vector<uint8_t> prepare_message_(uint16_t cmd, std::vector<uint8_t> args);
   void query_(uint16_t cmd, std::vector<uint8_t> args, int t_d);
   void parse_cb_(std::vector<uint8_t> msg);
   void process_incoming_chunk_(std::vector<uint8_t> chk);
-  std::string hex_(const std::vector<uint8_t> &data);
 
   void control(const climate::ClimateCall &call) override;
 
@@ -77,28 +97,26 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
   void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
   void dump_config() override;
   void set_outdoor_temperature_sensor(sensor::Sensor *sensor) { this->outdoor_temperature_sensor_ = sensor; }
+  void set_clean_filter_binary_sensor(binary_sensor::BinarySensor *sensor) {
+    this->clean_filter_binary_sensor_ = sensor;
+  }
   void set_firmware_version_text_sensor(text_sensor::TextSensor *sensor) {
     this->firmware_version_text_sensor_ = sensor;
   }
-  void set_dump_raw(bool dump_raw) { this->dump_raw_ = dump_raw; }
-  // Envoi d'une commande brute (function id + arguments) : utile pour sonder des
-  // fonctions non documentées du VAM depuis une lambda ESPHome. Les réponses
-  // arrivent dans les logs (activer dump_raw pour l'affichage hexadécimal).
-  void send_raw_command(uint16_t cmd, std::vector<uint8_t> args) { this->query_(cmd, std::move(args), 200); }
+  void set_eye_brightness_number(number::Number *number) { this->eye_brightness_number_ = number; }
+  void set_reset_filter_button(button::Button *button) { this->reset_filter_button_ = button; }
+  void set_eye_brightness(uint8_t level);
+  void reset_filter();
   float get_setup_priority() const override { return setup_priority::DATA; }
-
   climate::ClimateTraits traits() override {
     auto traits = climate::ClimateTraits();
-    // Un VAM ne fait que ventiler : ON => FAN_ONLY (mode VENTILATION), sinon OFF.
     traits.set_supported_modes({
         climate::CLIMATE_MODE_OFF,
         climate::CLIMATE_MODE_FAN_ONLY,
     });
     traits.set_supported_fan_modes({
         climate::CLIMATE_FAN_LOW,
-        climate::CLIMATE_FAN_MEDIUM,
         climate::CLIMATE_FAN_HIGH,
-        climate::CLIMATE_FAN_AUTO,
     });
     traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
     return traits;

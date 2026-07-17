@@ -12,7 +12,6 @@ static const char *const TAG = "madoka_vam";
 
 using namespace esphome::climate;
 
-// Function IDs du protocole BRC1H (voir blafois Daikin-Madoka reverse).
 static const uint16_t CMD_GET_SETTING_STATUS = 0x0020;
 static const uint16_t CMD_SET_SETTING_STATUS = 0x4020;
 static const uint16_t CMD_GET_OPERATION_MODE = 0x0030;
@@ -20,24 +19,28 @@ static const uint16_t CMD_SET_OPERATION_MODE = 0x4030;
 static const uint16_t CMD_GET_FAN_SPEED = 0x0050;
 static const uint16_t CMD_SET_FAN_SPEED = 0x4050;
 static const uint16_t CMD_GET_SENSOR_INFORMATION = 0x0110;
+static const uint16_t CMD_GET_CLEAN_FILTER = 0x0100;
 static const uint16_t CMD_GET_VERSION = 0x0130;
+static const uint16_t CMD_GET_EYE_BRIGHTNESS = 0x0302;
+static const uint16_t CMD_RESET_FILTER = 0x4220;
+static const uint16_t CMD_SET_EYE_BRIGHTNESS = 0x4302;
 
-void MadokaVam::dump_config() {
-  LOG_CLIMATE(TAG, "Daikin Madoka VAM (ventilation) Controller", this);
-  ESP_LOGCONFIG(TAG, "  Dump raw frames: %s", YESNO(this->dump_raw_));
+void MadokaVam::dump_config() { LOG_CLIMATE(TAG, "Daikin Madoka VAM Climate Controller", this); }
+
+void MadokaEyeBrightnessNumber::control(float value) {
+  int level = static_cast<int>(value + 0.5f);
+  if (level < 0) {
+    level = 0;
+  }
+  if (level > 19) {
+    level = 19;
+  }
+  this->parent_->set_eye_brightness(level);
 }
+
+void MadokaResetFilterButton::press_action() { this->parent_->reset_filter(); }
 
 void MadokaVam::setup() { this->receive_semaphore_ = xSemaphoreCreateMutex(); }
-
-std::string MadokaVam::hex_(const std::vector<uint8_t> &data) {
-  std::string out;
-  char buf[4];
-  for (auto b : data) {
-    snprintf(buf, sizeof(buf), "%02x ", b);
-    out += buf;
-  }
-  return out;
-}
 
 void MadokaVam::loop() {
   std::vector<uint8_t> chk = {};
@@ -68,9 +71,8 @@ void MadokaVam::control(const ClimateCall &call) {
         status_out = 0;
         break;
       case climate::CLIMATE_MODE_FAN_ONLY:
-        // Un VAM ne connaît que la ventilation : ON => mode VENTILATION (5).
         status_out = 1;
-        mode_out = OPERATION_MODE_VENTILATION;
+        mode_out = 5;
         break;
       default:
         ESP_LOGW(TAG, "Unsupported mode: %d", mode);
@@ -86,15 +88,8 @@ void MadokaVam::control(const ClimateCall &call) {
     uint8_t fan_mode = call.get_fan_mode().value();
     uint8_t fan_mode_out = 255;
     switch (fan_mode) {
-      case climate::CLIMATE_FAN_AUTO:
-        fan_mode_out = 0;
-        break;
       case climate::CLIMATE_FAN_LOW:
         fan_mode_out = 1;
-        break;
-      case climate::CLIMATE_FAN_MEDIUM:
-        fan_mode_out = 3;
-        break;
       case climate::CLIMATE_FAN_HIGH:
         fan_mode_out = 5;
         break;
@@ -103,8 +98,6 @@ void MadokaVam::control(const ClimateCall &call) {
         break;
     }
     if (fan_mode_out != 255) {
-      // On renseigne les deux emplacements (cooling 0x20 / heating 0x21) : le
-      // VAM utilise le premier, mais écrire les deux évite toute ambiguïté.
       this->query_(CMD_SET_FAN_SPEED,
                    std::vector<uint8_t>{0x20, 0x01, (uint8_t) fan_mode_out, 0x21, 0x01, (uint8_t) fan_mode_out}, 200);
     }
@@ -129,7 +122,7 @@ void MadokaVam::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
       auto *nfy = this->parent_->get_characteristic(MADOKA_SERVICE_UUID, NOTIFY_CHARACTERISTIC_UUID);
       auto *wwr = this->parent_->get_characteristic(MADOKA_SERVICE_UUID, WWR_CHARACTERISTIC_UUID);
       if (nfy == nullptr || wwr == nullptr) {
-        ESP_LOGW(TAG, "[%s] No control service found at device, not a Daikin Madoka/VAM..?", this->get_name().c_str());
+        ESP_LOGW(TAG, "[%s] No control service found at device, not a Daikin Madoka VAM..?", this->get_name().c_str());
         break;
       }
       this->notify_handle_ = nfy->handle;
@@ -147,11 +140,10 @@ void MadokaVam::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
   }
 }
 
-void MadokaVam::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
-                                    esp_ble_gattc_cb_param_t *param) {
+void MadokaVam::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
   switch (event) {
     case ESP_GATTC_DISCONNECT_EVT: {
-      this->node_state = espbt::ClientState::IDLE;
+      this->node_state = espbt::ClientState::IDLE;  // ??
       this->current_temperature = NAN;
       this->publish_state();
       break;
@@ -170,7 +162,7 @@ void MadokaVam::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t ga
       break;
     }
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
-      this->node_state = espbt::ClientState::ESTABLISHED;
+      this->node_state = espbt::ClientState::ESTABLISHED;  // ??
       break;
     }
     case ESP_GATTC_NOTIFY_EVT: {
@@ -201,17 +193,36 @@ void MadokaVam::update() {
   this->query_(CMD_GET_OPERATION_MODE, std::vector<uint8_t>{0x00, 0x00}, 50);
   this->query_(CMD_GET_FAN_SPEED, std::vector<uint8_t>{0x00, 0x00}, 50);
   this->query_(CMD_GET_SENSOR_INFORMATION, std::vector<uint8_t>{0x00, 0x00}, 50);
-  if (this->firmware_version_text_sensor_ != nullptr) {
-    this->query_(CMD_GET_VERSION, std::vector<uint8_t>{0x00, 0x00}, 50);
+  this->query_(CMD_GET_CLEAN_FILTER, std::vector<uint8_t>{0x00, 0x00}, 50);
+  this->query_(CMD_GET_VERSION, std::vector<uint8_t>{0x00, 0x00}, 50);
+  this->query_(CMD_GET_EYE_BRIGHTNESS, std::vector<uint8_t>{0x33, 0x01, 0x00}, 50);
+}
+
+void MadokaVam::set_eye_brightness(uint8_t level) {
+  if (this->node_state != espbt::ClientState::ESTABLISHED) {
+    return;
   }
+  this->query_(CMD_SET_EYE_BRIGHTNESS, std::vector<uint8_t>{0x33, 0x01, level}, 200);
+  if (this->eye_brightness_number_ != nullptr) {
+    this->eye_brightness_number_->publish_state(level);
+  }
+  this->should_update_ = true;
+}
+
+void MadokaVam::reset_filter() {
+  if (this->node_state != espbt::ClientState::ESTABLISHED) {
+    return;
+  }
+  this->query_(CMD_RESET_FILTER, std::vector<uint8_t>{0x51, 0x01, 0x01, 0xFE, 0x01, 0x01}, 200);
+  if (this->clean_filter_binary_sensor_ != nullptr) {
+    this->clean_filter_binary_sensor_->publish_state(false);
+  }
+  this->should_update_ = true;
 }
 
 bool validate_buffer(std::vector<uint8_t> buffer) { return buffer[0] == buffer.size(); }
 
 void MadokaVam::process_incoming_chunk_(std::vector<uint8_t> chk) {
-  if (this->dump_raw_) {
-    ESP_LOGD(TAG, "RX chunk: %s", this->hex_(chk).c_str());
-  }
   if (chk.size() < 2) {
     ESP_LOGI(TAG, "Chunk discarded: invalid length.");
     return;
@@ -254,7 +265,7 @@ std::vector<std::vector<uint8_t>> MadokaVam::split_payload_(std::vector<uint8_t>
   std::vector<std::vector<uint8_t>> result;
   size_t len = msg.size();
 
-  // Ajout de l'octet de longueur en tête (taille totale du payload incluse).
+  // Add leading length byte
   std::vector<uint8_t> buf{(uint8_t) (len + 1)};
   buf.insert(buf.end(), msg.begin(), msg.end());
 
@@ -281,9 +292,6 @@ void MadokaVam::query_(uint16_t cmd, std::vector<uint8_t> args, int t_d) {
   if (this->node_state != espbt::ClientState::ESTABLISHED) {
     return;
   }
-  if (this->dump_raw_) {
-    ESP_LOGD(TAG, "TX cmd 0x%04x: %s", cmd, this->hex_(payload).c_str());
-  }
   std::vector<std::vector<uint8_t>> chunks = this->split_payload_(payload);
 
   for (auto chk : chunks) {
@@ -309,10 +317,6 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
   uint16_t function_id = msg[2] << 8 | msg[3];
   uint8_t i = 4;
   uint8_t message_size = msg.size();
-
-  if (this->dump_raw_) {
-    ESP_LOGD(TAG, "RX msg fn 0x%04x: %s", function_id, this->hex_(msg).c_str());
-  }
 
   switch (function_id) {
     case CMD_GET_SETTING_STATUS:
@@ -343,14 +347,12 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
   switch (function_id) {
     case CMD_GET_SETTING_STATUS:
     case CMD_GET_OPERATION_MODE:
+      // ESP_LOGI(TAG, "status: %d, mode: %d", this->cur_status_.status, this->cur_status_.mode);
       if (this->cur_status_.status) {
-        // Le VAM ne devrait renvoyer que le mode VENTILATION quand il est ON.
-        // Tout autre mode est journalisé pour aider au reverse engineering.
-        if (this->cur_status_.mode == OPERATION_MODE_VENTILATION) {
-          this->mode = climate::CLIMATE_MODE_FAN_ONLY;
-        } else {
-          ESP_LOGD(TAG, "Unexpected operation mode for a VAM: %d (mapped to FAN_ONLY)", this->cur_status_.mode);
-          this->mode = climate::CLIMATE_MODE_FAN_ONLY;
+        switch (this->cur_status_.mode) {
+          case 5:
+            this->mode = climate::CLIMATE_MODE_FAN_ONLY;
+            break;
         }
       } else {
         this->mode = climate::CLIMATE_MODE_OFF;
@@ -361,23 +363,20 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
       while (i < message_size) {
         uint8_t argument_id = msg[i++];
         uint8_t len = msg[i++];
-        // En ventilation, la vitesse est portée par l'emplacement 0x20.
-        if (argument_id == 0x20 && len == 1) {
+        if (this->cur_status_.mode == 1) {
+        } else if ((argument_id == 0x21 && len == 1 && this->cur_status_.mode == 5) ||
+                   (argument_id == 0x20 && len == 1 && this->cur_status_.mode != 5)) {
           fan_mode = msg[i];
         }
         i += len;
       }
       switch (fan_mode) {
         case 0:
-          this->fan_mode = climate::CLIMATE_FAN_AUTO;
-          break;
         case 1:
-          this->fan_mode = climate::CLIMATE_FAN_LOW;
-          break;
         case 2:
         case 3:
         case 4:
-          this->fan_mode = climate::CLIMATE_FAN_MEDIUM;
+          this->fan_mode = climate::CLIMATE_FAN_LOW;
           break;
         case 5:
           this->fan_mode = climate::CLIMATE_FAN_HIGH;
@@ -399,6 +398,16 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
           if (value != 0xFF) {
             this->outdoor_temperature_sensor_->publish_state(value);
           }
+        }
+        i += len;
+      }
+      break;
+    case CMD_GET_CLEAN_FILTER:
+      while (i < message_size) {
+        uint8_t argument_id = msg[i++];
+        uint8_t len = msg[i++];
+        if (argument_id == 0x62 && this->clean_filter_binary_sensor_ != nullptr && len >= 1) {
+          this->clean_filter_binary_sensor_->publish_state((msg[i] & 0x01) == 0x01);
         }
         i += len;
       }
@@ -427,9 +436,17 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
       }
       break;
     }
+    case CMD_GET_EYE_BRIGHTNESS:
+      while (i < message_size) {
+        uint8_t argument_id = msg[i++];
+        uint8_t len = msg[i++];
+        if (argument_id == 0x33 && this->eye_brightness_number_ != nullptr && len >= 1) {
+          this->eye_brightness_number_->publish_state(msg[i]);
+        }
+        i += len;
+      }
+      break;
     default:
-      // Fonction non gérée : utile à repérer lors du reverse engineering du VAM.
-      ESP_LOGD(TAG, "Unhandled function 0x%04x (%d bytes)", function_id, message_size);
       break;
   }
 
