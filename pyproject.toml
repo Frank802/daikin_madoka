@@ -1,6 +1,27 @@
 # Tooling configuration only — this repository is a Home Assistant custom
 # integration, not an installable Python package.
 
+[tool.ruff.lint]
+# RUF012 asks for ClassVar on mutable class attributes. Home Assistant's
+# entity model is built on plain `_attr_*` class attributes, and its base
+# classes annotate them as *instance* variables (`_attr_hvac_modes:
+# list[HVACMode]` on ClimateEntity). Annotating them ClassVar in a subclass
+# is therefore a mypy override error — the two linters cannot both be
+# satisfied, and following the framework wins.
+ignore = ["RUF012"]
+
+[tool.ruff.lint.isort]
+# I001 only became a default rule in ruff 0.16. Keep the layout this repo
+# already used — `homeassistant` in its own block, integration code last —
+# rather than letting the linter's default grouping restyle every file. It
+# is also how Home Assistant core lays its imports out.
+known-first-party = ["homeassistant"]
+known-local-folder = ["custom_components", "tests"]
+# The repo's own `esphome/` directory otherwise makes isort read
+# `esphome.components` as local and `esphome.const` as third-party, splitting
+# one upstream package across two blocks in the ESPHome component sources.
+known-third-party = ["esphome"]
+
 [tool.mypy]
 # Non-strict baseline: keep CI green while annotations grow. Tightening
 # (disallow_untyped_defs, strict) can come platform by platform later.

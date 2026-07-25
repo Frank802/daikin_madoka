@@ -12,8 +12,14 @@ from homeassistant.helpers.entity import Entity
 
 from custom_components.daikin_madoka import (
     binary_sensor as binary_sensor_platform,
+)
+from custom_components.daikin_madoka import (
     button as button_platform,
+)
+from custom_components.daikin_madoka import (
     number as number_platform,
+)
+from custom_components.daikin_madoka import (
     sensor as sensor_platform,
 )
 from custom_components.daikin_madoka.const import (

@@ -1,6 +1,7 @@
 """Config flow for the Daikin Madoka platform."""
 
 import asyncio
+import contextlib
 from typing import Any
 
 import voluptuous as vol
@@ -139,11 +140,11 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception:  # noqa: BLE001  (DeviceUnreachableError, TimeoutError, anything)
             return "cannot_connect", None
         finally:
-            try:
-                # Capped so a wedged disconnect cannot hang the config flow.
+            # Best effort: the test connection is being torn down, so nothing
+            # this raises changes the flow's outcome. Capped so a wedged
+            # disconnect cannot hang the config flow.
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(controller.stop(), timeout=10)
-            except Exception:  # noqa: BLE001
-                pass
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak

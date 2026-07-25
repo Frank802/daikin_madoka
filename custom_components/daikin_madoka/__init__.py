@@ -1,14 +1,14 @@
 """Platform for the Daikin BRC1H (Madoka) thermostat."""
-from datetime import timedelta
 import logging
+from datetime import timedelta
 
 from pymadoka import Controller
 
+import homeassistant.helpers.config_validation as cv
 from homeassistant.const import CONF_DEVICES, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
-import homeassistant.helpers.config_validation as cv
 
 from .const import (
     CONF_BONDED_SOURCES,
@@ -155,7 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
 
         try:
             await controller.read_info()
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.debug("Could not read device info for %s", mac, exc_info=True)
 
         coordinators[mac] = coordinator
@@ -176,7 +176,7 @@ async def _safe_stop(controller: Controller) -> None:
     """Stop a controller, ignoring shutdown errors."""
     try:
         await controller.stop()
-    except Exception:  # noqa: BLE001
+    except Exception:
         _LOGGER.debug("Error stopping controller", exc_info=True)
 
 

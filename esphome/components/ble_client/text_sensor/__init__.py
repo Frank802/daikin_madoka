@@ -1,7 +1,7 @@
-from esphome import automation
 import esphome.codegen as cg
-from esphome.components import ble_client, esp32_ble_tracker, text_sensor
 import esphome.config_validation as cv
+from esphome import automation
+from esphome.components import ble_client, esp32_ble_tracker, text_sensor
 from esphome.const import (
     CONF_CHARACTERISTIC_UUID,
     CONF_NOTIFY,
