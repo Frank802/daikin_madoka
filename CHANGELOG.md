@@ -1,5 +1,49 @@
 # Changelog
 
+## v3.7.0 - July 2026
+
+### Madoka Card (0.7.0)
+
+- **Reconnect where you see the problem**: when the thermostat goes unreachable, the card now surfaces its **Reconnect** button instead of leaving you with dead controls — a banner in the `full`/`compact` layouts, and in the `tile` layout in place of the inert `−`/`+` pair. It shows a "reconnecting…" state while the BLE link is re-established and disappears on its own once the device is back. Configurable with `reconnect: auto | always | never` (default `auto`), or point it at a specific entity with `reconnect_entity:`.
+- The card finds the Reconnect button on its own from the thermostat's device — no configuration, and it is never confused with the *Reset filter* button (matched on the registry translation key, so a rename cannot break it).
+- The `−`/`+`/power controls of the full layout are now disabled while the thermostat is unavailable.
+- Bundled card bumped to 0.7.0 — hard-refresh the browser once after updating.
+- Docs: the README now shows the card (light and dark screenshots, served per the reader's theme).
+
+## v3.6.0 - July 2026
+
+**A dead bond can no longer flood the thermostat** — fixes the slow-motion pairing storm v3.5.0 left open ([#41](https://github.com/dasimon135/daikin_madoka/issues/41)). When a proxy listed as bonded had actually lost its bond, every 600 s setup retry re-initiated an SMP exchange with an 8 s budget no human can meet — an endless salvo of prompts that eventually jams the thermostat.
+
+- **The pairing-timeout streak survives entry retries.** The library's 3-round threshold was unreachable because Home Assistant rebuilds the connection on every retry and the counter restarted from zero; it now continues across rebuilds, so the refusal is actually concluded and the repair fires.
+- **A concluded refusal suspends automatic reconnects indefinitely** instead of re-prompting a screen nobody is watching every 5 minutes. The device is left alone until you press **Reconnect** (which opens the 60 s pairing window) or a session succeeds; the suspension survives retries and reloads.
+- **A suspended device still loads** in a degraded state, so the Reconnect button — the only remedy — actually exists. Previously the entry never finished setting up and the button never appeared.
+- Repair text rewritten (en/fr/es); diagnostics expose `pairing_suspended`.
+- Docs: dropped `CONFIG_BLE_SM_SC` / `CONFIG_BLE_SM_LEGACY` from the proxy guide — NimBLE symbols the Bluedroid stack never reads. A stock proxy only needs `io_capability: display_yes_no`.
+- No dependency change (pymadoka-ng stays at 0.3.9).
+
+[Full release notes](https://github.com/dasimon135/daikin_madoka/releases/tag/v3.6.0)
+
+## v3.5.0 - July 2026
+
+**Pairing becomes a deliberate act** — fixes the root cause behind the phantom pairing prompts that v3.4.0 only partly contained. A proxy sitting closer to a thermostat wins the RSSI ordering and gets tried first on every reconnect while holding *no bond*, so each attempt began a real numeric-comparison pairing nobody could confirm in time — and those half-finished SMP exchanges jam the BRC1H.
+
+- **Automatic reconnects can no longer start a pairing.** Every proxy that completes an authenticated session is recorded as bonded, and unattended reconnects are restricted to those, so they can only ever re-encrypt an existing bond. Entries predating the list fall back to their known preferred proxy; an install with nothing on record stays unrestricted so a first connect still works.
+- **The reconnect button opens a pairing window**: pressing it means you are standing at the thermostat, so unbonded proxies become reachable and the pairing budget widens to 60 s — enough to compare the code and accept. The window closes on the next successful poll.
+- **Pairing state survives the config-entry retry cycle** (moved to `hass.data`), so the backoff actually accumulates — on the coordinator it reset on every retry and never did.
+- Requires **pymadoka-ng 0.3.9** (configurable pairing budget).
+
+[Full release notes](https://github.com/dasimon135/daikin_madoka/releases/tag/v3.5.0)
+
+## v3.4.0 - July 2026
+
+**No more phantom pairing prompts** — fixes a failure mode where the integration wrongly concluded a thermostat had lost its bond, put a pairing prompt on its screen, and by retrying every poll jammed its Bluetooth stack until it was toggled off and on by hand. Under the connection contention of a restart, the encryption handshake of an **already valid** bond routinely exceeded its timeout, and a timeout was treated as proof the bond was gone.
+
+- **A pairing timeout is no longer proof of a missing bond** (via pymadoka-ng 0.3.8): it is treated as ambiguous and retried, and the pairing error is only reported after several consecutive rounds in which *every* path timed out. An explicit authentication rejection still reports immediately.
+- **Connects are serialized across devices**, so thermostats stop competing for the proxies that serve them. The lock is only held around a reconnect, never around a normal poll.
+- **A pairing refusal now backs off** (60 s, doubling, capped at 5 minutes) instead of re-attempting every poll. The reconnect button bypasses the backoff entirely.
+
+[Full release notes](https://github.com/dasimon135/daikin_madoka/releases/tag/v3.4.0)
+
 ## v3.3.0 - July 2026
 
 Quality release: easier reconfiguration, better observability, and a big step up in internal quality (typing, CI, test coverage).
