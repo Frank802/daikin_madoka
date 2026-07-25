@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.7.1 - July 2026
+
+**No more false "pairing required" quarantine on a Home Assistant restart.** Right after a restart the Bluetooth proxies are briefly congested, so a *valid* bond's SMP encryption runs slowly. The tight 8 s pairing budget could then time out and be misread as a lost bond, quarantining a thermostat that was never actually unbonded — typically one reached through a single, busy proxy. During the post-restart window the pairing budget is now widened (30 s) so a slow-but-valid bond has room to complete, then reverts to the tight budget once the device is back. A genuinely dead bond (an outright authentication rejection) still quarantines immediately, and the manual **Reconnect** window is unchanged.
+
 ## v3.7.0 - July 2026
 
 ### Madoka Card (0.7.0)

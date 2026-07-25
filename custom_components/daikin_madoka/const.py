@@ -20,6 +20,18 @@ CONF_BONDED_SOURCES = "bonded_sources"
 # used by automatic reconnects cannot accommodate a human.
 PAIRING_WINDOW_TIMEOUT = 60.0
 
+# Pairing budget for the first connect(s) after entry setup — the congested
+# window right after an HA restart when every Madoka reconnects at once through
+# a handful of ESPHome proxies. A valid SMP bond then encrypts slowly, and the
+# tight 8s steady-state default (pymadoka DEFAULT_PAIR_TIMEOUT) mistakes that
+# for an all-paths-timed-out round; a device reachable via a single congested
+# proxy accumulates the streak and gets falsely quarantined. This is NOT about
+# a human (that is PAIRING_WINDOW_TIMEOUT), so it keeps its own name; the value
+# matches CONNECT_TIMEOUT so the handshake can use the whole connect budget
+# instead of an artificial 8s slice. The coordinator reverts to the default
+# after the first successful connect, so steady-state reconnects stay fast.
+BOOT_PAIR_TIMEOUT = 30.0
+
 BRC1H_NAME_PREFIX = "BRC1H"
 
 # Advertised by the BRC1H (local_name is just "Daikin", so the service UUID is
