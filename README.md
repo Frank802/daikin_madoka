@@ -197,6 +197,12 @@ See [CHANGELOG.md](CHANGELOG.md) for available versions.
 
 ### Madoka Card (bundled)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/madoka-card-dark.png">
+  <img src="images/madoka-card.png" width="820"
+       alt="Madoka Card: the full dial layout next to a stack of tile rows, the last one offline showing its Reconnect button">
+</picture>
+
 A dial-style card that mirrors the physical BRC1H — a glowing halo that follows
 the mode, a setpoint arc, fan segments, an eye-brightness slider, a 12 h
 temperature sparkline and filter/signal chips. It ships **inside the
@@ -209,6 +215,7 @@ entity: climate.my_madoka
 # layout: full         # full | compact | tile  (default: full)
 # compact: true        # alias for layout: compact
 # name: "Bedroom"      # override the title
+# reconnect: auto      # auto | always | never  (default: auto)
 ```
 
 Three layouts: **full** (the dial with fan/brightness/graph), **compact**
@@ -216,9 +223,16 @@ Three layouts: **full** (the dial with fan/brightness/graph), **compact**
 mode-colored status dot + name + current→target + `−`/`+`) that lines up with
 Home Assistant's tile cards in a dense grid.
 
-The related entities (outdoor temperature, eye brightness, filter, signal) are
-discovered automatically from the same device — you only need the `climate.*`
-entity. It follows your Home Assistant theme and language (mode names use HA's
+**Reconnect on the spot**: when a thermostat drops off the air, the card
+surfaces its **Reconnect** button right where you noticed the problem — as a
+banner in the full/compact layouts, and in the tile layout in place of the
+`−`/`+` pair (which is inert while the device is unreachable). It disappears
+as soon as the link is back. Set `reconnect: always` to keep it visible at all
+times, or `reconnect: never` to hide it.
+
+The related entities (outdoor temperature, eye brightness, filter, signal,
+reconnect button) are discovered automatically from the same device — you only
+need the `climate.*` entity. It follows your Home Assistant theme and language (mode names use HA's
 own climate translations). The signal chip appears once you enable the
 disabled-by-default `sensor.*_signal_strength`.
 
