@@ -10,6 +10,7 @@ from pymadoka import (
     PowerStateStatus,
     SetPointStatus,
 )
+
 from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,

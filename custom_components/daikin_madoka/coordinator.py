@@ -1,9 +1,9 @@
 """Data update coordinator for Daikin Madoka thermostats."""
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
-import logging
 
 from pymadoka import ConnectionException, Controller, PairingRequiredError
 from pymadoka.connection import ConnectionStatus
@@ -214,7 +214,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
                 self._note_pairing_failure(err)
                 self._raise_pairing_issue(err)
                 raise UpdateFailed(str(err)) from err
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 # DeviceUnreachableError (and a wait_for TimeoutError) lands
                 # here on purpose: both feed the threshold-based
                 # device_unreachable repair, not a dedicated issue.
@@ -286,7 +286,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         conn = self.controller.connection
         try:
             await self.controller.stop()
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.debug("Reconnect: stop failed for %s", self.address, exc_info=True)
         # stop() -> cleanup() sets the library's _closing flag, which makes the
         # next start() bail out immediately; clear it so the coordinator's poll

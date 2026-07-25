@@ -148,11 +148,10 @@ async def test_reconnect_opens_a_pairing_window(hass: HomeAssistant) -> None:
     coordinator = _coordinator(hass, entry, controller)
 
     present, scanner = _patched_bluetooth()
-    with present, scanner:
-        with patch(
-            "custom_components.daikin_madoka.coordinator.asyncio.sleep", AsyncMock()
-        ):
-            await coordinator.async_reconnect()
+    with present, scanner, patch(
+        "custom_components.daikin_madoka.coordinator.asyncio.sleep", AsyncMock()
+    ):
+        await coordinator.async_reconnect()
 
     state = async_pairing_state(hass, MAC)
     assert state.pairing_window is True
