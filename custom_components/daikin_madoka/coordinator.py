@@ -17,6 +17,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    BOOT_PAIR_TIMEOUT,
     BRC1H_NAME_PREFIX,
     CONF_BONDED_SOURCES,
     CONF_MAC,
@@ -110,6 +111,16 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         self._issue_active = False
         self._pairing_issue_active = False
         self._boost_unsub: CALLBACK_TYPE | None = None
+        # The congestion-prone boot window: right after entry setup (and every
+        # ConfigEntryNotReady retry, which rebuilds this coordinator) the
+        # proxies are busy and a valid bond encrypts slowly. While this is set,
+        # the connect path widens the pairing budget so a slow-but-valid bond
+        # completes instead of being misread as a timeout and quarantined. It
+        # is cleared on the first successful poll, reverting to the tight
+        # default for steady-state. The original (tight) budget is captured so
+        # the revert restores whatever the controller was built with.
+        self._boot_window = True
+        self._default_pair_timeout = controller.connection.pair_timeout
         # Pairing suspension and window live in hass.data keyed by MAC, so
         # they survive the Controller/coordinator being rebuilt on a config
         # entry retry. last_error is chained onto the skipped polls'
@@ -172,6 +183,11 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # async_shutdown_extras) must NOT lift the suspension, or a simple
         # entry reload would grant a dead bond a fresh prompt salvo.
         self._clear_pairing_suspension()
+        # The congested boot window is over the moment one poll succeeds:
+        # revert to the tight steady-state pairing budget so ordinary
+        # reconnects fail fast instead of holding a proxy slot for the wide
+        # boot budget.
+        self._close_boot_window()
         self._async_persist_preferred_source()
         return data
 
@@ -203,6 +219,14 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
                     f"{self.address} needs pairing; automatic reconnects are "
                     "suspended until the reconnect button is pressed"
                 ) from self._pairing.last_error
+            if self._boot_window and not self._pairing.pairing_window:
+                # Boot window: widen the pairing budget so a valid bond that
+                # encrypts slowly under proxy congestion completes instead of
+                # timing out. Skipped while a user pairing window is open — it
+                # already set its own (wider, human-sized) budget and must keep
+                # it. A genuine auth rejection is immediate, not a timeout, so
+                # this never delays quarantining a truly dead bond.
+                self.controller.connection.pair_timeout = BOOT_PAIR_TIMEOUT
             try:
                 # Serialized: a connect storm across devices is what pushes
                 # valid bonds past their pairing timeout in the first place.
@@ -379,6 +403,20 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # The accusation has been delivered; the streak starts over after the
         # user re-pairs.
         self._pairing.timeout_rounds = 0
+
+    @callback
+    def _close_boot_window(self) -> None:
+        """End the congested-boot pairing grace after the first success.
+
+        Only closes the boot window itself and restores the tight budget; a
+        user-opened pairing window owns its own (wider) budget and closes via
+        _clear_issues, so leave it alone here.
+        """
+        if not self._boot_window:
+            return
+        self._boot_window = False
+        if not self._pairing.pairing_window:
+            self.controller.connection.pair_timeout = self._default_pair_timeout
 
     @callback
     def _clear_pairing_suspension(self) -> None:
