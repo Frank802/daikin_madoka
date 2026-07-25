@@ -25,7 +25,11 @@ jobs:
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          # Pinned: this repo has no [tool.ruff] section, so it inherits the
+          # linter's default rule set — an unpinned ruff turns an upstream
+          # default change into a red build on an unrelated PR (0.16.0 did
+          # exactly that). Bump deliberately, with the fixes in the same PR.
+          pip install ruff==0.15.22
 
       - name: Lint Python sources
         run: |
