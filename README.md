@@ -165,6 +165,37 @@ Add any of these under your `climate: - platform: madoka` block:
       name: "Reset Filter"
 ```
 
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `dual_setpoint` | `false` | Advertise two setpoints (heating/cooling range) instead of one. |
+
+The BRC1H can work with a single setpoint or with a heating/cooling **range**.
+The HA integration (Option 1) switches between the two automatically, because
+Home Assistant lets an entity change its supported features at runtime. ESPHome
+cannot: climate traits are sent once, when the ESP32 lists its entities, so the
+choice has to be made at build time.
+
+Leave `dual_setpoint` unset (single setpoint) unless range mode is enabled on
+the thermostat itself:
+
+```yaml
+climate:
+  - platform: madoka
+    name: "Living Room"
+    ble_client_id: my_madoka
+    dual_setpoint: true    # only if range mode is enabled on the BRC1H
+```
+
+In single mode the component writes the setpoint register matching the active
+mode (heating in `heat`, cooling otherwise) and leaves the other one as the
+thermostat last reported it — the same rule the HA integration follows.
+
+> **Behaviour change**: the ESP32 entity used to advertise two setpoints
+> unconditionally. After updating the external component, it exposes a single
+> setpoint unless you add `dual_setpoint: true`.
+
 ### Entities exposed
 
 Each thermostat creates:

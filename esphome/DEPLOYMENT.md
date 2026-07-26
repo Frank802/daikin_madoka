@@ -73,6 +73,7 @@ climate:
     name: "Madoka Thermostat"
     ble_client_id: madoka_1
     update_interval: 15s
+    # dual_setpoint: true   # seulement si le mode plage est actif sur le BRC1H
     outdoor_temperature:
       name: "Madoka Temp. Exterieure"
     clean_filter:
