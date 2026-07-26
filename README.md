@@ -49,7 +49,8 @@ Each thermostat creates:
 - `sensor.*_outdoor_temperature` — outdoor temperature
 - `sensor.*_operating_time` — cumulative hours the unit has been running (coarse, poll-interval granularity; persisted across restarts)
 - `sensor.*_signal_strength` — Bluetooth RSSI (diagnostic, disabled by default)
-- `sensor.*_connection_source` — which BLE path serves the thermostat: active proxy while connected, preferred (bonded) proxy otherwise (diagnostic, disabled by default)
+- `sensor.*_connection_source` — which BLE path serves the thermostat: active proxy while connected, preferred (bonded) proxy otherwise (diagnostic)
+- `sensor.*_connection_status` — `connected` / `retrying` / `pairing_slow` / `needs_pairing` / `not_advertising` (diagnostic). Tells the failures apart at a glance: `not_advertising` means no proxy can see the thermostat (range, power), `needs_pairing` means a proxy was explicitly refused and you must re-pair, `pairing_slow` means the handshake keeps timing out (often just a busy proxy). Like `signal_strength` and `connection_source`, it stays available while the thermostat does not — those three are what you read when everything else is `unavailable`.
 - `binary_sensor.*_clean_filter` — filter alert (device_class: problem)
 - `button.*_reset_filter` — reset filter timer
 - `button.*_reconnect` — drop and re-establish the Bluetooth connection (diagnostic)
@@ -87,6 +88,16 @@ ble_client:
 Then add the integration: on the first connection the thermostat shows a pairing prompt on its display — **accept it within a few seconds**. Notes:
 - The bond is stored **per proxy**: if several proxies can reach the thermostat, each one triggers its own (one-time) pairing prompt, and each needs the YAML above.
 - If pairing loops (prompt appears, then fails, then re-appears), un-pair on the thermostat (Bluetooth menu → forget) and retry.
+
+##### When a thermostat stops connecting
+
+A thermostat that has been added always loads, even when it cannot be reached: its entities go `unavailable` and Home Assistant keeps retrying in the background, rather than the device disappearing from the UI. Read `sensor.*_connection_status` first — it stays available and says which problem you have. Then, in order of effort:
+
+1. **`not_advertising`** — nothing to re-pair: the thermostat is off, out of range, or its proxy is down.
+2. **`pairing_slow`** — the handshake keeps timing out. Often a congested proxy; Home Assistant slows its attempts to one every 15 minutes and recovers on its own. Reloading the proxy's config entry frees stale connection slots and frequently fixes it.
+3. **`needs_pairing`** — a proxy explicitly refused the bond, which only a human at the thermostat can fix. Home Assistant raises a repair with a **Fix** button that walks you through it (stand at the thermostat, submit, accept the prompt on its screen). The device's **Reconnect** button does the same thing from the dashboard; the repair also works when the device has no entities at all.
+
+Remember the bond is per proxy: re-pairing restores one path, and another proxy may still need its own prompt.
 
 📘 **Reference proxy setup**: for the complete, annotated configuration — including a pairing responder per thermostat that pushes the 6-digit pairing code to Home Assistant as a notification (so you know *which* thermostat is pairing through *which* proxy), the passive-proxy alternative, and a troubleshooting table for multi-proxy homes — see **[docs/esphome-proxy.md](docs/esphome-proxy.md)**.
 
