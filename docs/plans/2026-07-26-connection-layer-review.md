@@ -379,3 +379,45 @@ them. Outcome: **28 confirmed (some with nuances folded into the text above),
 
 Verified against: integration v3.7.1 working tree, pymadoka-ng repo checkout
 v0.3.9 == manifest pin, HA core 2026.7.2.
+
+## 10. Verified parity bug (separate track): dual setpoint hardcoded on the ESPHome path
+
+Reported externally, verified 2026-07-26 against the working tree. **Confirmed,
+and deeper than reported** — the ESPHome path is two-point end to end, not just
+in the traits:
+
+- `esphome/components/madoka/madoka.h:130-131` —
+  `traits.add_feature_flags(... | climate::CLIMATE_REQUIRES_TWO_POINT_TARGET_TEMPERATURE)`
+  is unconditional: the ESP32 climate entity ALWAYS advertises dual setpoints.
+- `esphome/components/madoka/madoka.cpp:105-111` — `control()` only handles
+  `get_target_temperature_low/high`; there is **no single-setpoint branch at
+  all**. State publishing (`:415`, `:420`) only fills `target_temperature_high/
+  low`; `target_temperature` is explicitly NaN (`:181`).
+- The native integration is conditional and correct:
+  `custom_components/daikin_madoka/climate.py:104-125` — `_range_active` =
+  `hvac_mode == AUTO and set_point.range_enabled`, switching
+  `supported_features` between `TARGET_TEMPERATURE_RANGE` and
+  `TARGET_TEMPERATURE`.
+
+**Consequence:** disabling range mode on the BRC1H fixes the native-HA entity
+display but changes NOTHING on the ESP32 entity — the trait is compiled in.
+This is a code-level parity gap, not a user setting.
+
+**Constraint that shapes the fix:** ESPHome climate traits are advertised at
+entity-listing time and are effectively static per API connection — the ESPHome
+path cannot replicate the native path's *dynamic* (mode-dependent) switching.
+Config-level parity is the realistic target.
+
+**Fix outline (independent of the connection work, can ship any time):**
+1. Add a YAML option to the component schema
+   (`esphome/components/madoka/climate.py`), e.g. `dual_setpoint:
+   cv.boolean`, default `false` (single setpoint is the common BRC1H
+   configuration).
+2. `madoka.h traits()`: add `CLIMATE_REQUIRES_TWO_POINT_TARGET_TEMPERATURE`
+   only when enabled; otherwise single target temperature.
+3. `madoka.cpp control()`: add the missing `get_target_temperature()` branch
+   (single mode → write the setpoint register matching the current HVAC mode,
+   as pymadoka's setpoint feature does), keep the low/high branch for dual.
+4. State publish: fill `target_temperature` from the mode-relevant register
+   when single; keep high/low when dual.
+5. Document the option + the static-traits limitation in the component README.
