@@ -25,6 +25,8 @@ from homeassistant.helpers.entity import Entity
 from custom_components.daikin_madoka import sensor as sensor_platform
 from custom_components.daikin_madoka.const import CONF_MAC, DOMAIN
 from custom_components.daikin_madoka.coordinator import (
+    BACKOFF_PAIRING,
+    BACKOFF_UNREACHABLE,
     MadokaCoordinator,
     async_pairing_state,
 )
@@ -123,10 +125,52 @@ async def test_status_pairing_slow(hass: HomeAssistant) -> None:
     controller.connection.connection_status = ConnectionStatus.DISCONNECTED
     by_id, coordinator = await _sensors(hass, controller)
     coordinator.last_update_success = False
-    async_pairing_state(hass, MAC).backoff = True
+    state = async_pairing_state(hass, MAC)
+    state.backoff = True
+    state.backoff_reason = BACKOFF_PAIRING
 
     with patch(f"{BLUETOOTH}.async_address_present", return_value=True):
         assert by_id[f"{MAC}_connection_status"].native_value == "pairing_slow"
+
+
+async def test_status_backed_off_for_being_unreachable_is_not_pairing_slow(
+    hass: HomeAssistant,
+) -> None:
+    """The brake also engages on a plain failure streak — different story.
+
+    Telling the owner of a powered-off thermostat that pairing is slow sends
+    them to the device to re-pair something that only needs its power back.
+    """
+    controller = _controller()
+    controller.connection.connection_status = ConnectionStatus.DISCONNECTED
+    by_id, coordinator = await _sensors(hass, controller)
+    coordinator.last_update_success = False
+    state = async_pairing_state(hass, MAC)
+    state.backoff = True
+    state.backoff_reason = BACKOFF_UNREACHABLE
+
+    with patch(f"{BLUETOOTH}.async_address_present", return_value=False):
+        assert by_id[f"{MAC}_connection_status"].native_value == "not_advertising"
+
+
+async def test_status_connected_but_failing_is_retrying_not_not_advertising(
+    hass: HomeAssistant,
+) -> None:
+    """A BRC1H stops advertising WHILE CONNECTED, so presence says nothing.
+
+    Once HA's tracker ages the advert out, async_address_present is False for a
+    perfectly connected device. Reporting "not_advertising" for it is the exact
+    opposite of the truth, in the sensor built to tell the two apart.
+    """
+    controller = _controller()
+    controller.connection.connection_status = ConnectionStatus.CONNECTED
+    by_id, coordinator = await _sensors(hass, controller)
+    # Connected, but controller.update() is failing: not "connected", and
+    # certainly not "not advertising".
+    coordinator.last_update_success = False
+
+    with patch(f"{BLUETOOTH}.async_address_present", return_value=False):
+        assert by_id[f"{MAC}_connection_status"].native_value == "retrying"
 
 
 async def test_status_needs_pairing_outranks_everything_else(

@@ -200,8 +200,19 @@ class MadokaConnectionStatusSensor(MadokaLinkSensor):
         # proven refusal outranks an inference, which outranks an absence.
         if coordinator.pairing_suspended:
             return "needs_pairing"
-        if coordinator.pairing_backoff or coordinator.pairing_slow_issue_active:
+        # Only the pairing-timeout verdict says "pairing_slow". The cadence
+        # brake also engages on a plain streak of failed polls, and telling the
+        # owner of a powered-off thermostat that pairing is slow would send them
+        # to re-pair a device that only needs its power back.
+        if coordinator.pairing_slow_suspected:
             return "pairing_slow"
+        # A BRC1H stops advertising while it is connected, so HA's tracker ages
+        # its advert out within minutes of a healthy session. Checking presence
+        # before the link state made a CONNECTED device whose poll was failing
+        # report "not_advertising" — the exact opposite of the truth, in the one
+        # sensor built to tell those two apart.
+        if self.controller.connection.connection_status is ConnectionStatus.CONNECTED:
+            return "retrying"
         if not bluetooth.async_address_present(
             self.hass, coordinator.address, connectable=True
         ):
