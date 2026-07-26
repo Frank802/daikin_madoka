@@ -691,6 +691,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         if proven_rejection:
             self._note_pairing_failure(err)
             self._raise_pairing_issue(err)
+            self._async_start_reauth()
             return
         _LOGGER.warning(
             "%s did not complete pairing after %s timed-out rounds; slowing "
@@ -701,6 +702,29 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         )
         self._note_timeout_rounds()
         self._async_enter_timeout_backoff(err)
+
+    @callback
+    def _async_start_reauth(self) -> None:
+        """Ask HA for the recovery affordance that needs no entities at all.
+
+        Deliberately NOT by raising ConfigEntryAuthFailed. The first refresh
+        runs under raise_on_auth_failed=True, so that exception escapes
+        async_setup_entry and puts the entry in SETUP_ERROR — no entities,
+        exactly the catch-22 the unconditional degraded load just removed, and
+        precisely on the post-restart poll where a rejection surfaces. It would
+        also stop the coordinator rescheduling itself (_async_refresh skips
+        _schedule_refresh when auth_failed), so the device could never recover
+        on its own once a single rejection was recorded.
+
+        async_start_reauth keeps the entry loaded and polling, is idempotent
+        (HA drops the call while a reauth or reconfigure flow is already open
+        for this entry), and adds a repair with a Fix button ALONGSIDE the
+        Reconnect button rather than instead of it — two independent ways out,
+        one of which survives having no dashboard and no entities.
+        """
+        if self.config_entry is None:
+            return
+        self.config_entry.async_start_reauth(self.hass)
 
     @callback
     def _note_pairing_failure(self, err: PairingRequiredError) -> None:

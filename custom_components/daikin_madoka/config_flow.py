@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -26,15 +27,18 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     BRC1H_NAME_PREFIX,
+    CONF_BONDED_SOURCES,
     CONF_FRIENDLY_NAME,
     CONF_MAC,
     CONF_PREFERRED_SOURCE,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MADOKA_SERVICE_UUID,
+    PAIRING_WINDOW_TIMEOUT,
     RSSI_DISCOVERY_FLOOR,
     VALIDATE_TIMEOUT,
 )
+from .coordinator import async_forget_pairing_state
 from .util import normalize_mac
 
 
@@ -114,8 +118,14 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         a moment to reappear, so the device may be briefly invisible when
         async_setup_entry runs its real connect right after entry creation.
         That is acceptable — the coordinator fails fast on "not advertising"
-        and retries on the next poll, and setup retries via
-        ConfigEntryNotReady — so no sleep is added here.
+        and retries on the next poll, and the entry now loads degraded — so no
+        sleep is added here.
+
+        Runs the USER_INITIATED profile: a config flow is by definition
+        attended, so the pairing budget is the human one (PAIRING_WINDOW_TIMEOUT
+        inside VALIDATE_TIMEOUT = PAIRING_CONNECT_TIMEOUT), and the candidate
+        list is unrestricted — a proxy that holds no bond yet is exactly the one
+        this connect exists to bond with.
         """
         from pymadoka import ConnectionStatus, Controller, PairingRequiredError
 
@@ -126,6 +136,7 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             hass=self.hass,
             reconnect=False,
             candidates_callback=lambda: build_candidates(self.hass, mac, None),
+            pair_timeout=PAIRING_WINDOW_TIMEOUT,
         )
         try:
             await asyncio.wait_for(controller.start(), timeout=VALIDATE_TIMEOUT)
@@ -230,6 +241,61 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user", data_schema=self._user_schema(), errors=errors
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start recovery from a PROVEN pairing refusal.
+
+        Started by the coordinator (ConfigEntry.async_start_reauth) the moment
+        a path explicitly rejects the authenticated bond. Unlike the Reconnect
+        button this needs no entities and no dashboard: HA puts a Fix button on
+        the entry itself, which is the only affordance that still works when
+        everything else about the device is broken.
+        """
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask the user to stand at the thermostat, then pair for real."""
+        entry = self._get_reauth_entry()
+        # Legacy multi-MAC entries have no single device to re-pair.
+        if CONF_MAC not in entry.data:
+            return self.async_abort(reason="reconfigure_legacy")
+        mac = normalize_mac(entry.data[CONF_MAC]) or entry.data[CONF_MAC]
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            error_key, source = await self._async_validate_device(mac)
+            if error_key is None:
+                # The pairing just succeeded, so every verdict recorded against
+                # this device is now false: drop the quarantine, the timeout
+                # streak and the failure count, in memory and in the entry,
+                # before the reload below rehydrates from it.
+                async_forget_pairing_state(self.hass, entry, mac)
+                data = {**entry.data}
+                if source is not None:
+                    # This proxy demonstrably holds a bond now: record it, so
+                    # the automatic profile is allowed to use it.
+                    data[CONF_PREFERRED_SOURCE] = source
+                    bonded = list(data.get(CONF_BONDED_SOURCES, []))
+                    if source not in bonded:
+                        bonded.append(source)
+                    data[CONF_BONDED_SOURCES] = bonded
+                return self.async_update_reload_and_abort(
+                    entry, data=data, reason="reauth_successful"
+                )
+            # Unlike the fire-and-forget Reconnect button, a failure here is
+            # reported to the person who is standing at the thermostat.
+            errors["base"] = error_key
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({}),
+            errors=errors,
+            description_placeholders={"name": entry.title},
         )
 
     async def async_step_reconfigure(

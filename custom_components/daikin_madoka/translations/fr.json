@@ -6,7 +6,8 @@
       "already_in_progress": "Une configuration est déjà en cours",
       "weak_signal": "Signal trop faible — l'appareil est probablement en dehors de votre domicile.",
       "reconfigure_successful": "Reconfiguration réussie",
-      "reconfigure_legacy": "Cette entrée héritée couvre plusieurs thermostats et ne peut pas être reconfigurée. Supprimez-la et ajoutez chaque thermostat individuellement."
+      "reconfigure_legacy": "Cette entrée héritée couvre plusieurs thermostats et ne peut pas être reconfigurée. Supprimez-la et ajoutez chaque thermostat individuellement.",
+      "reauth_successful": "Réappairage réussi"
     },
     "error": {
       "not_a_mac": "Format d'adresse MAC incorrect (ex. AA:BB:CC:DD:EE:FF)",
@@ -28,6 +29,10 @@
         "data": {
           "friendly_name": "Nom convivial (optionnel, ex. « Salon »)"
         }
+      },
+      "reauth_confirm": {
+        "title": "Réappairer {name}",
+        "description": "{name} a refusé le lien Bluetooth : Home Assistant ne peut plus communiquer avec lui. Le réappairage exige votre présence devant le thermostat.\n\nPlacez-vous devant {name}, appuyez sur Valider, puis acceptez l'invite d'appairage qui apparaît sur son écran (comparez le code à 6 chiffres). Vous disposez d'environ une minute. Un appairage appartient à un seul proxy Bluetooth : il faudra peut-être recommencer plus tard pour un autre proxy."
       },
       "reconfigure": {
         "title": "Reconfigurer Daikin Madoka",

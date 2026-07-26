@@ -6,7 +6,8 @@
       "already_in_progress": "Ya hay un flujo de configuración en curso",
       "weak_signal": "Señal demasiado débil — el dispositivo probablemente está fuera de tu casa.",
       "reconfigure_successful": "Reconfiguración completada",
-      "reconfigure_legacy": "Esta entrada heredada cubre varios termostatos y no se puede reconfigurar. Elimínala y añade cada termostato individualmente."
+      "reconfigure_legacy": "Esta entrada heredada cubre varios termostatos y no se puede reconfigurar. Elimínala y añade cada termostato individualmente.",
+      "reauth_successful": "Reemparejamiento completado"
     },
     "error": {
       "not_a_mac": "Formato de dirección MAC incorrecto (p. ej. AA:BB:CC:DD:EE:FF)",
@@ -28,6 +29,10 @@
         "data": {
           "friendly_name": "Nombre descriptivo (opcional, p. ej. 'Salón')"
         }
+      },
+      "reauth_confirm": {
+        "title": "Volver a emparejar {name}",
+        "description": "{name} ha rechazado el vínculo Bluetooth, por lo que Home Assistant ya no puede comunicarse con él. Volver a emparejar requiere que estés delante del termostato.\n\nColócate delante de {name}, pulsa Enviar y acepta la solicitud de emparejamiento que aparece en su pantalla (compara el código de 6 dígitos). Dispones de aproximadamente un minuto. Un emparejamiento pertenece a un solo proxy Bluetooth: puede que haya que repetirlo más adelante para otro proxy."
       },
       "reconfigure": {
         "title": "Reconfigurar Daikin Madoka",

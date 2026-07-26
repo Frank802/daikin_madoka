@@ -427,3 +427,33 @@ async def test_validator_returns_connected_source_on_success() -> None:
 
     assert await _validate_with(controller) == (None, PROXY_SOURCE)
     assert controller.stop.await_count == 1
+
+
+# --- The pairing budget the validator runs on (P1.3) ----------------------
+# Every config flow is attended by definition: the user is being asked to
+# stand at the thermostat. It used to run on pymadoka's 8s pair_timeout
+# default under a 30s ceiling, which is the SMALLEST pairing budget in the
+# integration - at the one moment a human is guaranteed to be present.
+
+
+async def test_validator_pairs_with_the_human_budget() -> None:
+    """The flow connects under the USER_INITIATED profile."""
+    from pymadoka import ConnectionStatus
+
+    from custom_components.daikin_madoka.const import (
+        PAIRING_WINDOW_TIMEOUT,
+        VALIDATE_TIMEOUT,
+    )
+
+    controller = _stub_controller(ConnectionStatus.CONNECTED, source=PROXY_SOURCE)
+    handler = FlowHandler()
+    handler.hass = None
+
+    with patch("pymadoka.Controller", return_value=controller) as controller_cls:
+        await handler._async_validate_device(MAC)
+
+    assert controller_cls.call_args.kwargs["pair_timeout"] == PAIRING_WINDOW_TIMEOUT
+    # The invariant: the inner pairing budget must stay STRICTLY below the
+    # outer connect budget, or pymadoka's own timeout never fires, no pairing
+    # round is ever classified, and no verdict can form (see const.py).
+    assert PAIRING_WINDOW_TIMEOUT < VALIDATE_TIMEOUT

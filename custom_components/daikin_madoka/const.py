@@ -97,10 +97,14 @@ TIMEOUT_BACKOFF_INTERVAL_S = 900.0
 # can't actually pair with. Manual setup (async_step_user) is the escape
 # hatch — it never filters on signal strength.
 RSSI_DISCOVERY_FLOOR = -90
-# Ceiling on the config-flow validation connect. Matches CONNECT_TIMEOUT's
-# rationale: it must exceed the connect path's internal budget (candidate
-# retries + pairing prompt + settle) or a slow-but-successful first pairing
-# gets cut short and reported as cannot_connect.
-VALIDATE_TIMEOUT = 30
+# Ceiling on the config-flow validation connect. Every config flow — initial
+# setup, discovery confirmation, MAC change, reauth — is a moment where a human
+# is GUARANTEED to be standing at the thermostat, so all of them run the
+# USER_INITIATED profile: PAIRING_WINDOW_TIMEOUT inside PAIRING_CONNECT_TIMEOUT.
+# It used to be the opposite: the flow left pair_timeout at pymadoka's 8s
+# default under a 30s ceiling, so the one guaranteed-attended moment had the
+# smallest pairing budget of the whole integration and a user who walked to the
+# thermostat could not confirm in time.
+VALIDATE_TIMEOUT = PAIRING_CONNECT_TIMEOUT
 # Hard ceiling on one full-feature poll (queries retry individually).
 POLL_TIMEOUT = 45

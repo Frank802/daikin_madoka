@@ -6,7 +6,8 @@
       "already_in_progress": "Configuration flow is already in progress",
       "weak_signal": "Signal too weak — the device is probably outside your home.",
       "reconfigure_successful": "Reconfiguration successful",
-      "reconfigure_legacy": "This legacy entry covers several thermostats and cannot be reconfigured. Remove it and add each thermostat individually."
+      "reconfigure_legacy": "This legacy entry covers several thermostats and cannot be reconfigured. Remove it and add each thermostat individually.",
+      "reauth_successful": "Re-pairing successful"
     },
     "error": {
       "not_a_mac": "Wrong MAC address format (e.g. AA:BB:CC:DD:EE:FF)",
@@ -28,6 +29,10 @@
         "data": {
           "friendly_name": "Friendly name (optional, e.g. 'Living room')"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-pair {name}",
+        "description": "{name} refused the Bluetooth bond, so Home Assistant cannot talk to it any more. Re-pairing needs you at the thermostat.\n\nStand in front of {name}, press Submit, then accept the pairing prompt that appears on its screen (compare the 6-digit code). You have about a minute. A bond belongs to one Bluetooth proxy, so this may need repeating for another proxy later."
       },
       "reconfigure": {
         "title": "Reconfigure Daikin Madoka",
