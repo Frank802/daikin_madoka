@@ -9,9 +9,19 @@ never formed a verdict, and a genuinely dead bond could no longer be
 diagnosed - the anti-storm quarantine silently disarmed itself in exactly the
 post-restart window it exists for.
 
-Hence the invariant this file guards: whatever profile is active, the inner
-pair budget must stay STRICTLY below the outer connect budget, so the
-library's classifier can always run and evidence is always collected.
+The fix stated that invariant PER ATTEMPT, and that was the second half of the
+same regression: pymadoka counts a pairing ROUND only after walking EVERY
+candidate, so a round costs N * (connect overhead + pair budget). 22 < 30 holds
+for one path and for no other number, and with 3-4 proxies seeing each
+thermostat the round counter stayed at 0 forever - same missing verdict, same
+disarmed quarantine, plus a 4.4x amplification of pairing attempts because the
+timeout backoff hangs off that verdict.
+
+Hence the invariant this file guards, in its per-round form:
+
+    N * (CANDIDATE_CONNECT_OVERHEAD_S + pair budget) < outer connect budget
+
+so the library's classifier can always run and evidence is always collected.
 
 Two profiles, selected by who initiated the attempt:
 
@@ -37,11 +47,14 @@ from homeassistant.core import HomeAssistant
 
 from custom_components.daikin_madoka.const import (
     AUTOMATIC_PAIR_TIMEOUT,
+    CANDIDATE_CONNECT_OVERHEAD_S,
     CONF_MAC,
     CONNECT_TIMEOUT,
     DOMAIN,
+    MIN_PAIR_TIMEOUT,
     PAIRING_CONNECT_TIMEOUT,
     PAIRING_WINDOW_TIMEOUT,
+    ROUND_HEADROOM_S,
 )
 from custom_components.daikin_madoka.coordinator import (
     MadokaCoordinator,
@@ -124,6 +137,131 @@ def test_inner_pair_budget_is_strictly_below_the_outer_connect_budget() -> None:
             f"profile pairing_window={pairing_window} cancels pair() before the "
             "library can classify the failure"
         )
+
+
+def test_a_full_candidate_round_fits_inside_the_outer_budget() -> None:
+    """The invariant is PER ROUND, not per attempt. This is the real arithmetic.
+
+    pymadoka increments _pairing_timeout_rounds only after walking EVERY
+    candidate (every_path_failed_auth compares against len(candidates)), so a
+    round costs N * (connect overhead + pair budget). Stating the invariant per
+    attempt (22 < 30) held only for N == 1: with the 3-4 proxies that see each
+    thermostat here, every attempt was cancelled by the outer wait with the
+    round counter still at 0 — no verdict, ever, hence no backoff, hence a dead
+    bond re-initiating SMP every 60s forever.
+
+    Asserted against the numbers, not against a MagicMock with the round
+    counter set by hand: a mock can never catch this class of bug.
+    """
+    for pairing_window in (False, True):
+        for paths in (1, 2, 3, 4, 8):
+            pair_budget, connect_budget = connection_profile(pairing_window, paths)
+            round_cost = paths * (CANDIDATE_CONNECT_OVERHEAD_S + pair_budget)
+            assert round_cost <= connect_budget, (
+                f"pairing_window={pairing_window}, {paths} candidates: a round "
+                f"costs {round_cost}s but the attempt is cancelled at "
+                f"{connect_budget}s, so the library can never count it"
+            )
+            # Not merely equal: something has to be left for building the
+            # candidate list and for the classification after the loop.
+            assert connect_budget - round_cost >= ROUND_HEADROOM_S
+
+
+def test_the_shaped_pair_budget_never_drops_below_the_floor() -> None:
+    """v3.7.1's whole point: a slow-but-valid bond must still be able to finish.
+
+    Shrinking the pair budget to make a round fit is the easy fix and the wrong
+    one past MIN_PAIR_TIMEOUT — below it a healthy bond re-encrypting through a
+    congested proxy starts failing again. The outer budget gives way instead.
+    """
+    for pairing_window in (False, True):
+        for paths in (1, 2, 3, 4, 8):
+            pair_budget, _ = connection_profile(pairing_window, paths)
+            assert pair_budget >= MIN_PAIR_TIMEOUT
+
+
+def test_more_candidates_never_shorten_the_time_available_per_path() -> None:
+    """Adding a proxy must not make each path's pairing budget unusable."""
+    previous = None
+    for paths in (1, 2, 3, 4, 8):
+        pair_budget, connect_budget = connection_profile(False, paths)
+        assert connect_budget >= CONNECT_TIMEOUT
+        if previous is not None:
+            assert pair_budget <= previous
+        previous = pair_budget
+
+
+def test_a_single_candidate_still_gets_the_documented_ceilings() -> None:
+    """Shaping must not quietly change the one case that already worked."""
+    assert connection_profile(False, 1) == (AUTOMATIC_PAIR_TIMEOUT, CONNECT_TIMEOUT)
+    assert connection_profile(True, 1) == (
+        PAIRING_WINDOW_TIMEOUT,
+        PAIRING_CONNECT_TIMEOUT,
+    )
+
+
+def test_no_candidate_at_all_behaves_like_one() -> None:
+    """An empty list raises DeviceUnreachableError before any budget matters."""
+    assert connection_profile(False, 0) == connection_profile(False, 1)
+
+
+async def test_the_connect_budget_is_sized_from_the_live_candidate_list(
+    hass: HomeAssistant,
+) -> None:
+    """The count comes from the callback pymadoka itself will call.
+
+    Not from a second copy of the filtering rules: the bonded-source
+    restriction, the pairing window and the free-slot ordering all change how
+    many paths a connect actually walks, and a count that drifts from them puts
+    the round back over the budget.
+    """
+    entry = _entry(hass)
+    controller = _disconnected_controller()
+    controller.connection.candidates_callback = lambda: [object()] * 3
+    seen_pair_budgets: list[float] = []
+
+    async def _connect() -> None:
+        seen_pair_budgets.append(controller.connection.pair_timeout)
+        controller.connection.connection_status = ConnectionStatus.CONNECTED
+
+    controller.start = AsyncMock(side_effect=_connect)
+    coordinator = _coordinator(hass, entry, controller)
+
+    present, scanner = _patched_bluetooth()
+    seen_connect_budgets, spy = _budget_spy()
+    with present, scanner, spy:
+        await coordinator.async_refresh()
+
+    expected_pair, expected_connect = connection_profile(False, 3)
+    assert seen_pair_budgets == [expected_pair]
+    assert expected_connect in seen_connect_budgets
+    assert expected_connect > CONNECT_TIMEOUT
+
+
+async def test_a_broken_candidates_callback_falls_back_to_one_path(
+    hass: HomeAssistant,
+) -> None:
+    """Sizing is a hint, never a reason to fail a connect."""
+    entry = _entry(hass)
+    controller = _disconnected_controller()
+
+    def _boom():
+        raise RuntimeError("registry unavailable")
+
+    controller.connection.candidates_callback = _boom
+
+    async def _connect() -> None:
+        controller.connection.connection_status = ConnectionStatus.CONNECTED
+
+    controller.start = AsyncMock(side_effect=_connect)
+    coordinator = _coordinator(hass, entry, controller)
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success
+    assert controller.connection.pair_timeout == AUTOMATIC_PAIR_TIMEOUT
 
 
 def test_profiles_expose_the_documented_budgets() -> None:

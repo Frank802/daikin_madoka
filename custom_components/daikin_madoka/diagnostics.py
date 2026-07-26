@@ -41,9 +41,17 @@ def _pairing_states(hass: HomeAssistant, entry: MadokaConfigEntry) -> dict | Non
         states[mac] = {
             "suspended": state.suspended,
             "backoff": state.backoff,
+            # Which of the two independent triggers braked the cadence: a
+            # pairing verdict, or a plain streak of failed polls.
+            "backoff_reason": state.backoff_reason if state.backoff else None,
             "pairing_window": state.pairing_window,
             "timeout_rounds": state.timeout_rounds,
             "fail_count": state.fail_count,
+            # Polls that never reached the device because another Madoka
+            # coordinator held the shared connect lock. A non-zero value here
+            # next to a healthy-looking device is the signature of lock
+            # starvation, which is otherwise invisible above DEBUG.
+            "skipped_polls": state.skipped_polls,
             # Per-proxy refusal streaks: the only place the bond-eviction
             # bookkeeping is visible, and the first thing to look at when a
             # thermostat reaches fewer proxies than the user expects.
@@ -101,6 +109,8 @@ async def async_get_config_entry_diagnostics(
             },
             "pairing_suspended": coordinator.pairing_suspended,
             "pairing_backoff": coordinator.pairing_backoff,
+            "backoff_reason": coordinator.backoff_reason,
+            "skipped_polls": coordinator.skipped_polls,
         }
 
     return {

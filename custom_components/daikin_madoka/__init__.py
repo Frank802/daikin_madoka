@@ -1,6 +1,5 @@
 """Platform for the Daikin BRC1H (Madoka) thermostat."""
 import logging
-from datetime import timedelta
 
 from pymadoka import Controller
 
@@ -216,10 +215,16 @@ async def _safe_stop(controller: Controller) -> None:
 async def _async_update_listener(
     hass: HomeAssistant, entry: MadokaConfigEntry
 ) -> None:
-    """Apply a new poll interval without tearing down the BLE connection."""
+    """Apply a new poll interval without tearing down the BLE connection.
+
+    Delegated rather than assigned: this listener fires on EVERY
+    async_update_entry, including the ones the coordinator itself performs to
+    persist a preferred source or a pairing verdict, and assigning
+    update_interval here used to silently disarm an active timeout backoff.
+    """
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     for coordinator in entry.runtime_data.values():
-        coordinator.update_interval = timedelta(seconds=scan_interval)
+        coordinator.async_apply_scan_interval(scan_interval)
 
 
 async def async_unload_entry(

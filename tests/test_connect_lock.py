@@ -38,9 +38,13 @@ from custom_components.daikin_madoka.const import (
     DOMAIN,
 )
 from custom_components.daikin_madoka.coordinator import (
+    MAX_CONSECUTIVE_SKIPS,
     MadokaCoordinator,
     _async_connect_lock,
     async_pairing_state,
+)
+from custom_components.daikin_madoka.diagnostics import (
+    async_get_config_entry_diagnostics,
 )
 
 MAC = "D0:CF:13:0F:11:F6"
@@ -94,9 +98,21 @@ def _patched_bluetooth():
 
 
 def _tiny_budgets():
-    """Shrink both profiles' outer budgets so the wait is testable in real time."""
+    """Shrink both profiles' outer budgets so the wait is testable in real time.
+
+    Every part of the budget has to shrink together: connection_profile stretches
+    the outer budget when the per-candidate share would fall under
+    MIN_PAIR_TIMEOUT, so leaving the floor and the overheads at their real values
+    would quietly restore a ~14s budget and make this a 14s test.
+    """
     return (
-        patch(f"{COORDINATOR}.CONNECT_TIMEOUT", 0.05),
+        patch.multiple(
+            COORDINATOR,
+            CONNECT_TIMEOUT=0.05,
+            MIN_PAIR_TIMEOUT=0.01,
+            CANDIDATE_CONNECT_OVERHEAD_S=0.0,
+            ROUND_HEADROOM_S=0.0,
+        ),
         patch(f"{COORDINATOR}.PAIRING_CONNECT_TIMEOUT", 0.05),
     )
 
@@ -199,6 +215,109 @@ async def test_a_skipped_cycle_does_not_consume_the_pairing_window(
     assert state.pairing_window is True
     # The window's TTL timer must not outlive the test.
     coordinator.async_shutdown_extras()
+
+
+async def test_stale_data_is_served_for_a_bounded_number_of_skips(
+    hass: HomeAssistant,
+) -> None:
+    """Lock starvation must not serve hours-old readings as current, forever.
+
+    A skip proves nothing about the device, so it counts no failure - but
+    "proves nothing" became "hides everything": last_update_success stayed True
+    on every skip, so entities kept showing the last good temperature as fresh
+    with nothing above DEBUG and no counter anywhere. Bounded now: after
+    MAX_CONSECUTIVE_SKIPS the device goes unavailable honestly.
+    """
+    entry = _entry(hass)
+    controller = _controller()
+    coordinator = _coordinator(hass, entry, controller)
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+    good = coordinator.data
+
+    lock = _async_connect_lock(hass)
+    await lock.acquire()
+    controller.connection.connection_status = ConnectionStatus.DISCONNECTED
+    try:
+        for cycle in range(1, MAX_CONSECUTIVE_SKIPS):
+            present, scanner = _patched_bluetooth()
+            connect, pair = _tiny_budgets()
+            with present, scanner, connect, pair:
+                await coordinator.async_refresh()
+            assert coordinator.last_update_success is True, cycle
+            assert coordinator.data == good
+            assert coordinator.skipped_polls == cycle
+
+        present, scanner = _patched_bluetooth()
+        connect, pair = _tiny_budgets()
+        with present, scanner, connect, pair:
+            await coordinator.async_refresh()
+    finally:
+        lock.release()
+
+    assert coordinator.skipped_polls == MAX_CONSECUTIVE_SKIPS
+    assert coordinator.last_update_success is False
+    # Still not a device failure: the streaks that drive the quarantine and the
+    # repairs must stay untouched by contention between our own coordinators.
+    state = async_pairing_state(hass, MAC)
+    assert state.fail_count == 0
+    assert state.timeout_rounds == 0
+    assert coordinator.unreachable_issue_active is False
+
+
+async def test_a_reached_device_resets_the_skip_counter(
+    hass: HomeAssistant,
+) -> None:
+    """Only CONSECUTIVE skips mean starvation."""
+    entry = _entry(hass)
+    controller = _controller()
+    coordinator = _coordinator(hass, entry, controller)
+
+    lock = _async_connect_lock(hass)
+    await lock.acquire()
+    present, scanner = _patched_bluetooth()
+    connect, pair = _tiny_budgets()
+    try:
+        with present, scanner, connect, pair:
+            await coordinator.async_refresh()
+    finally:
+        lock.release()
+    assert coordinator.skipped_polls == 1
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.skipped_polls == 0
+
+
+async def test_the_skip_counter_is_visible_in_diagnostics(
+    hass: HomeAssistant,
+) -> None:
+    """A counter nobody can read is not much better than no counter at all."""
+    entry = _entry(hass)
+    controller = _controller()
+    coordinator = _coordinator(hass, entry, controller)
+    entry.runtime_data = {MAC: coordinator}
+
+    lock = _async_connect_lock(hass)
+    await lock.acquire()
+    present, scanner = _patched_bluetooth()
+    connect, pair = _tiny_budgets()
+    try:
+        with present, scanner, connect, pair:
+            await coordinator.async_refresh()
+    finally:
+        lock.release()
+
+    _, scanner = _patched_bluetooth()
+    with scanner:
+        report = await async_get_config_entry_diagnostics(hass, entry)
+    assert report["devices"]["device_0"]["skipped_polls"] == 1
+    assert report["pairing_state"]["skipped_polls"] == 1
 
 
 async def test_the_lock_is_released_when_the_connect_fails(

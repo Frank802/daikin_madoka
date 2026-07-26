@@ -47,21 +47,36 @@ DEFAULT_SCAN_INTERVAL = 60
 # surfaces quickly; pairing refusals are never masked.
 STALE_GRACE = 2
 # ---------------------------------------------------------------------------
-# Connection budgets — THE INVARIANT: the inner pair budget must always stay
-# STRICTLY BELOW the outer connect budget that wraps controller.start().
+# Connection budgets — THE INVARIANT, and it is a PER-ROUND one:
 #
-# Not a matter of taste. pymadoka wraps its own pair() in wait_for(pair_timeout)
-# and only counts a pairing round when that inner timeout fires. If pair_timeout
-# is greater than or equal to the outer budget, the whole attempt is cancelled
-# first, no round is ever counted, no verdict (rejection vs timeout streak) can
-# ever form — and the dead-bond quarantine silently stops working. v3.7.1
-# shipped BOOT_PAIR_TIMEOUT = 30 under CONNECT_TIMEOUT = 30 and did exactly
-# that, in the post-restart window where the quarantine matters most.
+#     N * (CANDIDATE_CONNECT_OVERHEAD_S + pair_budget) < outer connect budget
 #
-# Two profiles, selected by who initiated the attempt (see
-# coordinator.connection_profile):
+# where N is the number of candidate paths the connect will try.
 #
-#   profile         inner pair budget            outer connect budget
+# Not a matter of taste. pymadoka wraps its own pair() in wait_for(pair_timeout),
+# but it only counts a pairing ROUND after it has walked EVERY candidate
+# (`every_path_failed_auth = auth_rejections + pair_timeouts == len(candidates)`
+# in Connection._connect_via_ha). A round therefore costs N times one candidate's
+# connect overhead plus its full pair budget — not one pair budget. If the outer
+# wait cancels the attempt before the loop ends, no round is ever counted, no
+# verdict (rejection vs timeout streak) can ever form, and the dead-bond
+# quarantine silently stops working.
+#
+# Two regressions came out of getting this wrong, and they were NOT the same bug:
+#   * v3.7.1 shipped BOOT_PAIR_TIMEOUT = 30 under CONNECT_TIMEOUT = 30, so the
+#     inner timeout could not fire even with a single candidate.
+#   * The follow-up stated the invariant PER ATTEMPT (22 < 30), which only holds
+#     for N == 1. In a house with 3-4 proxies seeing each thermostat — the
+#     ordinary case here — every attempt was cancelled at 30s with the round
+#     counter still at 0, forever. No verdict, hence no backoff, hence a dead
+#     bond polled at full cadence: ~80 SMP initiations/h against ~18 before.
+#
+# Hence the budgets below are CEILINGS, not the values actually used: the
+# effective pair budget is shaped against the live candidate count by
+# coordinator.connection_profile(), which also stretches the outer budget when
+# the floor binds. Two profiles, selected by who initiated the attempt:
+#
+#   profile         inner pair ceiling           outer connect ceiling
 #   AUTOMATIC       AUTOMATIC_PAIR_TIMEOUT 22    CONNECT_TIMEOUT          30
 #   USER_INITIATED  PAIRING_WINDOW_TIMEOUT 60    PAIRING_CONNECT_TIMEOUT  90
 # ---------------------------------------------------------------------------
@@ -87,18 +102,45 @@ PAIRING_WINDOW_TIMEOUT = 60.0
 # was cancelled at ~28s.
 PAIRING_CONNECT_TIMEOUT = 90.0
 
+# Everything a candidate costs BESIDES its pairing budget: establish_connection
+# (max_attempts=1), the notify subscription and pymadoka's SETTLE_DELAY. ~2s on
+# a local adapter, ~3s through a loaded ESPHome proxy. Over-estimating only
+# tightens the shaped pair budget slightly; under-estimating puts the round back
+# over the outer budget, which is the whole bug, so round up.
+CANDIDATE_CONNECT_OVERHEAD_S = 3.0
+# Floor under the shaped pair budget. pymadoka's own default is 8s and v3.7.1
+# exists precisely because a VALID bond re-encrypting through a congested proxy
+# needs more than a tight budget: shrinking below this to make a round fit would
+# re-create the failure v3.7.1 fixed. When the floor binds, the outer budget is
+# stretched instead — a longer attempt is affordable (the cadence brake keeps a
+# stalling device to one attempt per TIMEOUT_BACKOFF_INTERVAL_S), a mis-timed
+# one is not.
+MIN_PAIR_TIMEOUT = 8.0
+# Slack kept inside the outer budget for the parts of an attempt that are not
+# per-candidate work: building the candidate list, the library's own
+# classification after the loop, and scheduler jitter.
+ROUND_HEADROOM_S = 3.0
+
 # A pairing window is a loan. It closes on the first attempt that consumes it
 # (success or failure) and, failing that, on this deadline — an open window
 # lifts the bonded-proxy restriction and disarms the quarantine, so it must
 # never outlive the user standing at the thermostat.
 PAIRING_WINDOW_TTL_S = 180.0
 
-# Poll interval imposed on a device whose pairing attempts keep timing out
-# (never on one that was explicitly rejected — that is quarantined instead).
-# A timeout streak is only an inference, so the device is not convicted; but a
-# dead BRC1H bond does fail by silent timeout, so attempts must not continue at
-# the normal cadence either. 15 minutes keeps a real recovery reachable without
-# re-creating the prompt storm.
+# Poll interval imposed on a device that keeps failing to connect — either
+# because pairing keeps timing out (the library's verdict) or simply because
+# UNREACHABLE_THRESHOLD polls in a row failed for any reason at all. Never on a
+# device that was explicitly rejected: that one is quarantined instead.
+#
+# The second, verdict-INDEPENDENT trigger is deliberate. The library's round
+# counter is a fragile side channel — it needs a full round to complete, which
+# needs the candidate arithmetic above to be right, which is exactly what broke
+# twice. A device that has failed five polls in a row does not need a diagnosis
+# to deserve a slower cadence, and hanging the only brake in the integration off
+# a verdict that may never form is how a dead bond ended up polling forever.
+#
+# 15 minutes keeps a real recovery reachable without re-creating the prompt
+# storm; the normal interval comes back on the first successful poll.
 TIMEOUT_BACKOFF_INTERVAL_S = 900.0
 # Discovery adverts below this RSSI are almost certainly a neighbour's BRC1H
 # bleeding through a wall: don't offer a discovery card for a device the user
