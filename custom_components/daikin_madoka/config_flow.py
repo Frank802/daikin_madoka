@@ -31,6 +31,7 @@ from .const import (
     CONF_BONDED_SOURCES,
     CONF_FRIENDLY_NAME,
     CONF_MAC,
+    CONF_PAIRING_STATE,
     CONF_PREFERRED_SOURCE,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -43,6 +44,17 @@ from .coordinator import async_forget_pairing_state
 from .util import normalize_mac
 
 _LOGGER = logging.getLogger(__name__)
+
+# Everything in entry.data that describes the CONNECTION rather than the user's
+# choices. HA's async_update_entry(data=...) REPLACES the mapping, so any step
+# that rebuilds entry.data from scratch silently deletes these — and losing
+# bonded_sources alone turns a thermostat reachable through four proxies into a
+# single-path device, one rename at a time.
+CONNECTION_STATE_KEYS = (
+    CONF_PREFERRED_SOURCE,
+    CONF_BONDED_SOURCES,
+    CONF_PAIRING_STATE,
+)
 
 
 class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -352,12 +364,23 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_FRIENDLY_NAME: friendly,
                     }
                     if mac_changed:
+                        # A different thermostat: every bond, sticky proxy and
+                        # verdict on record belongs to the old one and must NOT
+                        # be carried over. The validation above just
+                        # authenticated, so that path is the new device's first
+                        # known bond.
                         if source is not None:
                             data[CONF_PREFERRED_SOURCE] = source
-                    elif CONF_PREFERRED_SOURCE in entry.data:
-                        data[CONF_PREFERRED_SOURCE] = entry.data[
-                            CONF_PREFERRED_SOURCE
-                        ]
+                            data[CONF_BONDED_SOURCES] = [source]
+                    else:
+                        # Same thermostat, so the connection state is still
+                        # true. Carrying it through is not cosmetic: entry.data
+                        # is replaced wholesale here, and dropping
+                        # bonded_sources used to reduce a four-proxy device to
+                        # its single preferred proxy on a mere rename.
+                        for key in CONNECTION_STATE_KEYS:
+                            if key in entry.data:
+                                data[key] = entry.data[key]
                     return self.async_update_reload_and_abort(
                         entry,
                         unique_id=mac,
