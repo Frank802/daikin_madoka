@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     AUTOMATIC_PAIR_TIMEOUT,
+    BOND_EVICTION_FAILURES,
     BRC1H_NAME_PREFIX,
     CONF_BONDED_SOURCES,
     CONF_MAC,
@@ -139,6 +140,12 @@ class MadokaPairingState:
     # and the device_unreachable repair could never fire — two dead thermostats
     # produced zero notifications (field incident 2026-07-26).
     fail_count: int = 0
+    # Consecutive PROVEN pairing refusals per proxy source. Lives here, not on
+    # the coordinator, for the same reason as everything above: the counter has
+    # to survive the rebuild a setup retry performs, or a bond can never
+    # accumulate enough evidence to be evicted. Cleared for a source the moment
+    # that source authenticates again.
+    auth_failures: dict[str, int] = field(default_factory=dict)
 
     def as_stored(self) -> dict[str, Any] | None:
         """Serialize the durable part of the verdict, or None if it is empty.
@@ -160,6 +167,8 @@ class MadokaPairingState:
             # the clamp is what stops a permanently dead device from rewriting
             # the config entry on every single poll.
             stored["fail_count"] = min(self.fail_count, UNREACHABLE_THRESHOLD)
+        if self.auth_failures:
+            stored["auth_failures"] = dict(self.auth_failures)
         if self.last_error is not None:
             stored["last_error"] = {
                 "tried_sources": list(self.last_error.tried_sources)
@@ -183,12 +192,21 @@ class MadokaPairingState:
             last_error = PairingRequiredError(
                 address, list(sources) if isinstance(sources, list) else []
             )
+        raw_failures = stored.get("auth_failures")
+        auth_failures = {}
+        if isinstance(raw_failures, Mapping):
+            auth_failures = {
+                str(source): count
+                for source, count in raw_failures.items()
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0
+            }
         return cls(
             last_error=last_error,
             timeout_rounds=_count("timeout_rounds"),
             suspended=bool(stored.get("suspended")),
             backoff=bool(stored.get("backoff")),
             fail_count=_count("fail_count"),
+            auth_failures=auth_failures,
         )
 
 
@@ -323,7 +341,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         except _PollSkipped as err:
             # A cycle that never reached the device. Serve the last good data if
             # there is any (the device is not known to be in trouble, so its
-            # entities must not blink), otherwise report a plain failure â€” but
+            # entities must not blink), otherwise report a plain failure — but
             # in NEITHER case touch a counter, a streak or the pairing window.
             # Raised inside this except clause, the UpdateFailed below does not
             # re-enter the sibling clause, so nothing is accumulated.
@@ -459,7 +477,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # by EVERY Madoka coordinator and is held across pymadoka's own retry
         # backoff (sleep 5->10->20->40->60 plus a fixed 2s, all inside start()),
         # so one device with a dead bond used to park it for a whole connect
-        # budget while doing nothing â€” delaying healthy devices, congesting the
+        # budget while doing nothing — delaying healthy devices, congesting the
         # proxies and manufacturing the pair timeouts that convict them. That is
         # the cascade that turned one bad bond into several (field incident
         # 2026-07-26), and waiting was unbounded: N stuck devices stacked N
@@ -469,7 +487,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # upstream change, so the locked region cannot be shortened here: bound
         # the WAIT instead. Waiting longer than one full attempt of our own
         # profile means the queue ahead of us is already longer than the work we
-        # came to do â€” give up this cycle and let the next poll retry. Combined
+        # came to do — give up this cycle and let the next poll retry. Combined
         # with the timeout backoff, a stalling device polls rarely and therefore
         # contends rarely.
         lock = _async_connect_lock(self.hass)
@@ -506,6 +524,12 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             is not ConnectionStatus.CONNECTED
         ):
             raise UpdateFailed(f"Device {self.address} is not reachable")
+        # The link is up AND authenticated, which is the whole proof a bond
+        # exists on this path — record it here rather than after a full poll.
+        # A connect that authenticates but whose controller.update() then fails
+        # used to record nothing at all, and on_disconnect clears
+        # connected_source, so the evidence was simply lost.
+        self._async_record_bonded_source()
 
     async def async_boost(self) -> None:
         """Refresh now and once more shortly after.
@@ -606,6 +630,11 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             or CONF_MAC not in self.config_entry.data
         ):
             return
+        # A completed session is the strongest possible acquittal for this path,
+        # and an eviction streak only means anything while it is CONSECUTIVE.
+        # Cleared here as well as in _async_record_bonded_source because a poll
+        # over an already-open link never goes through the connect path at all.
+        self._pairing.auth_failures.pop(source, None)
         bonded = list(self.config_entry.data.get(CONF_BONDED_SOURCES, []))
         if source not in bonded:
             bonded.append(source)
@@ -624,6 +653,106 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
                 CONF_BONDED_SOURCES: bonded,
             },
         )
+
+    @callback
+    def _async_record_bonded_source(self) -> None:
+        """Record the proxy that just authenticated as holding a bond.
+
+        Called as soon as controller.start() returns CONNECTED, which is the
+        moment the bond is proven — everything after it (the GATT poll) can fail
+        for reasons that say nothing about pairing.
+
+        connected_source is None on the library's fallback single-device path
+        (it only ever sets it in the candidates loop), and that path is exactly
+        the one that lets HA's scorer pick a proxy and pair with it
+        unconditionally: recording it would launder an auto-pairing into a
+        policy-approved bond. The None guard is deliberate, keep it.
+        """
+        source = self.controller.connection.connected_source
+        if (
+            not source
+            or self.config_entry is None
+            or CONF_MAC not in self.config_entry.data
+        ):
+            return
+        # This path just authenticated, so whatever it was accused of before is
+        # over: a streak has to be CONSECUTIVE to mean anything.
+        self._pairing.auth_failures.pop(source, None)
+        bonded = list(self.config_entry.data.get(CONF_BONDED_SOURCES, []))
+        if source in bonded:
+            return
+        bonded.append(source)
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            data={**self.config_entry.data, CONF_BONDED_SOURCES: bonded},
+        )
+
+    @callback
+    def _async_evict_dead_bond(self, err: PairingRequiredError) -> None:
+        """Drop a proxy from the bonded list once it has proven it holds no bond.
+
+        Only reached from the PROVEN-rejection branch: a timeout streak is an
+        inference and must never cost a bond.
+
+        Attribution is the hard part. PairingRequiredError.tried_sources is a
+        flat list with no per-path verdict, so a round over three proxies cannot
+        say WHICH of them rejected — the library only reports that the round as a
+        whole ended in a rejection. A single-source round is unambiguous and is
+        attributed; anything else records nothing. Under-evicting merely costs a
+        few futile retries on a dead path, while over-evicting deletes the one
+        path that still works and needs a human at the thermostat to restore.
+        (Upstream: PairingRequiredError needs a per-path verdict — see
+        docs/plans/2026-07-26-connection-layer-review.md, section 7.)
+        """
+        if len(err.tried_sources) != 1 or not err.tried_sources[0]:
+            return
+        source = err.tried_sources[0]
+        # Clamped: past the threshold a bigger number changes nothing, and the
+        # clamp is what stops a device whose eviction is blocked (last bonded
+        # path) from rewriting the config entry on every poll, forever.
+        failures = min(
+            self._pairing.auth_failures.get(source, 0) + 1, BOND_EVICTION_FAILURES
+        )
+        self._pairing.auth_failures[source] = failures
+        if failures < BOND_EVICTION_FAILURES:
+            return
+        entry = self.config_entry
+        if entry is None or CONF_MAC not in entry.data:
+            return
+        bonded = list(entry.data.get(CONF_BONDED_SOURCES, []))
+        if source not in bonded:
+            return
+        if len(bonded) <= 1:
+            # NEVER empty the list. build_candidates treats an empty
+            # CONF_BONDED_SOURCES as "unrestricted", so evicting the last entry
+            # would not protect the device — it would silently switch the
+            # anti-storm policy off and let unattended polls pair with any proxy
+            # in range. The recovery path for a device with no working bond is
+            # the reauth flow (a human, deliberately), not an eviction.
+            _LOGGER.warning(
+                "%s: %s keeps refusing the bond, but it is the only proxy known "
+                "to hold one — keeping it and leaving recovery to a re-pair",
+                self.address,
+                self._proxy_names([source]),
+            )
+            return
+        bonded.remove(source)
+        self._pairing.auth_failures.pop(source, None)
+        _LOGGER.warning(
+            "%s: dropping %s from the bonded proxies after %d refusals; "
+            "reconnects will use the remaining %d",
+            self.address,
+            self._proxy_names([source]),
+            BOND_EVICTION_FAILURES,
+            len(bonded),
+        )
+        data = {**entry.data, CONF_BONDED_SOURCES: bonded}
+        if data.get(CONF_PREFERRED_SOURCE) == source:
+            # Leaving a sticky proxy that is no longer allowed would just make
+            # the ordering key match nothing; drop it and let the next
+            # successful session elect a new one.
+            data.pop(CONF_PREFERRED_SOURCE, None)
+        self.hass.config_entries.async_update_entry(entry, data=data)
 
     @callback
     def _raise_unreachable_issue(self) -> None:
@@ -736,6 +865,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         )
         if proven_rejection:
             self._note_pairing_failure(err)
+            self._async_evict_dead_bond(err)
             self._raise_pairing_issue(err)
             self._async_start_reauth()
             return

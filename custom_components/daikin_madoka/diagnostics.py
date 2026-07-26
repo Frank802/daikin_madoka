@@ -44,6 +44,13 @@ def _pairing_states(hass: HomeAssistant, entry: MadokaConfigEntry) -> dict | Non
             "pairing_window": state.pairing_window,
             "timeout_rounds": state.timeout_rounds,
             "fail_count": state.fail_count,
+            # Per-proxy refusal streaks: the only place the bond-eviction
+            # bookkeeping is visible, and the first thing to look at when a
+            # thermostat reaches fewer proxies than the user expects.
+            "auth_failures": {
+                _resolve_source(hass, source) or source: count
+                for source, count in state.auth_failures.items()
+            },
             "last_error": str(state.last_error) if state.last_error else None,
         }
     if not states:

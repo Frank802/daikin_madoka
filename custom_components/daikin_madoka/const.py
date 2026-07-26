@@ -14,6 +14,14 @@ CONF_PREFERRED_SOURCE = "preferred_source"
 # BRC1H when repeated. Empty/absent means "not known yet" — treated as
 # unrestricted so a fresh install can still find its first path.
 CONF_BONDED_SOURCES = "bonded_sources"
+# Consecutive PROVEN pairing refusals attributed to one proxy before that proxy
+# is dropped from CONF_BONDED_SOURCES. The list used to be append-only, so a
+# reflashed, replaced or manually unpaired proxy stayed "bonded" forever and
+# every reconnect kept retrying that dead path — feeding the very storm the
+# restriction exists to prevent. Three, not one: attribution is imperfect (see
+# MadokaCoordinator._async_evict_dead_bond) and forgetting a good bond costs a
+# full re-pair with a human at the thermostat, so the evidence has to repeat.
+BOND_EVICTION_FAILURES = 3
 # Durable shadow of the per-MAC pairing verdict (suspended / backoff /
 # timeout streak / consecutive failures / last pairing error), keyed by MAC.
 # The live copy lives in hass.data so it survives a coordinator rebuild; this
