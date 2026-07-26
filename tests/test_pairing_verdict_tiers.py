@@ -48,12 +48,26 @@ STREAK = 3
 BLUETOOTH = "homeassistant.components.bluetooth"
 
 
-def _controller(rounds: int | None = 0) -> MagicMock:
+def _error(reason: str | None = None, sources: list[str | None] | None = None):
+    """A PairingRequiredError as pymadoka 0.3.9 or 0.3.10 would raise it.
+
+    The pinned library is still 0.3.9, whose constructor knows nothing about
+    `reason`, so 0.3.10 is modelled by setting the attribute on the instance —
+    which is exactly what the coordinator reads.
+    """
+    err = PairingRequiredError(MAC, sources if sources is not None else [SOURCE])
+    if reason is not None:
+        err.reason = reason
+    return err
+
+
+def _controller(rounds: int | None = 0, err=None) -> MagicMock:
     """Disconnected controller whose connect raises PairingRequiredError.
 
     rounds is what the library leaves on connection.pairing_timeout_rounds at
-    the moment it raises: 0 after a proven rejection, >= 3 after a streak.
-    None models a future library that dropped the property entirely.
+    the moment it raises: 0 after a proven rejection, >= 3 after a streak
+    (pymadoka <= 0.3.9). None models a library that dropped the property.
+    err overrides the raised exception, to model 0.3.10's `reason`.
     """
     controller = MagicMock()
     controller.connection.address = MAC
@@ -65,7 +79,7 @@ def _controller(rounds: int | None = 0) -> MagicMock:
         del controller.connection.pairing_timeout_rounds
     else:
         controller.connection.pairing_timeout_rounds = rounds
-    controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [SOURCE]))
+    controller.start = AsyncMock(side_effect=err or _error())
     controller.update = AsyncMock()
     controller.refresh_status.return_value = {"set_point": {"cooling_set_point": 25}}
     return controller
@@ -254,6 +268,90 @@ async def test_a_missing_round_counter_takes_the_safe_branch(
     assert async_pairing_state(hass, MAC).suspended is False
     assert registry.async_get_issue(DOMAIN, f"pairing_required_{MAC}") is None
     assert registry.async_get_issue(DOMAIN, f"pairing_slow_{MAC}") is not None
+
+
+# --------------------------------------------------------------------------
+# pymadoka >= 0.3.10 states the reason outright; it outranks the side channel
+# --------------------------------------------------------------------------
+
+
+async def test_reason_rejected_convicts_even_when_the_counter_says_streak(
+    hass: HomeAssistant,
+) -> None:
+    """The library's own verdict wins over the counter we used to infer it.
+
+    0.3.10 resets the streak at BOTH raise sites, so the counter no longer
+    discriminates anything — reading it first would silently invert the
+    diagnosis on the version we are about to run.
+    """
+    entry = _entry(hass)
+    controller = _controller(rounds=STREAK, err=_error(reason="rejected"))
+    coordinator = _coordinator(hass, entry, controller)
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    registry = ir.async_get(hass)
+    assert async_pairing_state(hass, MAC).suspended is True
+    assert registry.async_get_issue(DOMAIN, f"pairing_required_{MAC}") is not None
+    assert registry.async_get_issue(DOMAIN, f"pairing_slow_{MAC}") is None
+
+
+async def test_reason_timeout_streak_never_convicts_whatever_the_counter_says(
+    hass: HomeAssistant,
+) -> None:
+    """rounds == 0 used to mean "proven rejection"; the reason says otherwise.
+
+    This is the false quarantine of field incident 2026-07-26, now impossible:
+    a thermostat whose bond is intact must never be locked out on an inference.
+    """
+    entry = _entry(hass)
+    controller = _controller(rounds=0, err=_error(reason="timeout_streak"))
+    coordinator = _coordinator(hass, entry, controller)
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    registry = ir.async_get(hass)
+    assert async_pairing_state(hass, MAC).suspended is False
+    assert registry.async_get_issue(DOMAIN, f"pairing_required_{MAC}") is None
+    assert registry.async_get_issue(DOMAIN, f"pairing_slow_{MAC}") is not None
+    assert coordinator.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+
+
+async def test_an_unknown_reason_takes_the_safe_branch(hass: HomeAssistant) -> None:
+    """A value we do not understand is not evidence of a refusal."""
+    entry = _entry(hass)
+    controller = _controller(rounds=0, err=_error(reason="something_new"))
+    coordinator = _coordinator(hass, entry, controller)
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    registry = ir.async_get(hass)
+    assert async_pairing_state(hass, MAC).suspended is False
+    assert registry.async_get_issue(DOMAIN, f"pairing_required_{MAC}") is None
+    assert registry.async_get_issue(DOMAIN, f"pairing_slow_{MAC}") is not None
+
+
+async def test_legacy_library_still_uses_the_side_channel(
+    hass: HomeAssistant,
+) -> None:
+    """0.3.9 is the pinned version: its rejections must still be recognised."""
+    entry = _entry(hass)
+    controller = _controller(rounds=0, err=_error())  # no reason attribute
+    coordinator = _coordinator(hass, entry, controller)
+    assert not hasattr(controller.start.side_effect, "reason")
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    assert async_pairing_state(hass, MAC).suspended is True
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"pairing_required_{MAC}")
 
 
 async def test_backoff_survives_a_coordinator_rebuild(hass: HomeAssistant) -> None:

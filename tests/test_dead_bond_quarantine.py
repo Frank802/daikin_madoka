@@ -110,8 +110,34 @@ async def test_timeout_round_streak_survives_a_config_entry_retry(
     assert async_pairing_state(hass, MAC).timeout_rounds == 2
 
     # HA retries the entry: a brand-new Controller and Connection. The fresh
-    # Connection must resume the streak, not restart it from zero.
+    # Connection must resume the streak, not restart it from zero — through
+    # pymadoka >= 0.3.10's supported setter when it exists (a MagicMock always
+    # offers it), falling back to the private attribute on 0.3.9.
     second = _coordinator(hass, entry, _disconnected_controller())
+    second.controller.connection.resume_pairing_timeout_rounds.assert_called_once_with(
+        2
+    )
+
+
+async def test_the_streak_resumes_on_a_library_without_the_setter(
+    hass: HomeAssistant,
+) -> None:
+    """0.3.9 is the pinned version and exposes a read-only property only."""
+    entry = _entry(hass)
+    present, scanner = _patched_bluetooth()
+
+    first = _coordinator(hass, entry, _disconnected_controller())
+    first.controller.connection.pairing_timeout_rounds = 2
+    first.controller.start = AsyncMock(
+        side_effect=ConnectionException("cancelled mid-round")
+    )
+    with present, scanner:
+        await first.async_refresh()
+
+    legacy = _disconnected_controller()
+    del legacy.connection.resume_pairing_timeout_rounds
+    second = _coordinator(hass, entry, legacy)
+
     assert second.controller.connection._pairing_timeout_rounds == 2
 
 

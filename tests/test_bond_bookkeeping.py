@@ -230,12 +230,106 @@ async def test_evicting_the_last_bonded_source_is_refused(
     assert entry.data[CONF_BONDED_SOURCES] == [PROXY_A]
 
 
-async def test_a_multi_path_refusal_evicts_nothing(hass: HomeAssistant) -> None:
-    """tried_sources is flat: a 2-path round cannot say WHICH path refused.
+def _refuse_with_evidence(
+    coordinator: MadokaCoordinator,
+    sources: list[str | None],
+    evidence: dict[str | None, str],
+) -> None:
+    """A refusal as pymadoka >= 0.3.10 reports it: with a per-path verdict.
 
-    pymadoka reports the round, not a per-path verdict, so attribution is
-    impossible here. Under-evicting costs a few futile retries; over-evicting
-    deletes the one path that still works.
+    The pinned library is 0.3.9, whose constructor knows nothing about
+    `reason` / `evidence`, so the newer shape is modelled by setting the
+    attributes on the instance — exactly what the coordinator reads.
+    """
+    err = PairingRequiredError(MAC, sources)
+    err.reason = "rejected"
+    err.evidence = evidence
+    coordinator.controller.start = AsyncMock(side_effect=err)
+
+
+async def _refuse_with_evidence_repeatedly(
+    hass: HomeAssistant,
+    coordinator: MadokaCoordinator,
+    sources: list[str | None],
+    evidence: dict[str | None, str],
+    times: int,
+) -> None:
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        for _ in range(times):
+            async_pairing_state(hass, MAC).suspended = False
+            _refuse_with_evidence(coordinator, sources, evidence)
+            await coordinator.async_refresh()
+
+
+async def test_evidence_attributes_a_refusal_in_a_multi_path_round(
+    hass: HomeAssistant,
+) -> None:
+    """The whole point of the per-path verdict: eviction in a real home.
+
+    With three or four proxies a round is never single-path, so the
+    "exactly one tried source" rule made eviction unreachable and a dead
+    proxy stayed on the bonded list forever.
+    """
+    entry = _entry(hass, **{CONF_BONDED_SOURCES: [PROXY_A, PROXY_B]})
+    coordinator = _coordinator(hass, entry, _controller())
+
+    await _refuse_with_evidence_repeatedly(
+        hass,
+        coordinator,
+        [PROXY_A, PROXY_B],
+        {PROXY_A: "rejected", PROXY_B: "timeout"},
+        BOND_EVICTION_FAILURES,
+    )
+
+    assert entry.data[CONF_BONDED_SOURCES] == [PROXY_B]
+    assert async_pairing_state(hass, MAC).auth_failures.get(PROXY_B) is None
+
+
+async def test_evidence_never_charges_a_path_that_only_timed_out(
+    hass: HomeAssistant,
+) -> None:
+    """A timeout is congestion until proven otherwise, per path as well."""
+    entry = _entry(hass, **{CONF_BONDED_SOURCES: [PROXY_A, PROXY_B]})
+    coordinator = _coordinator(hass, entry, _controller())
+
+    await _refuse_with_evidence_repeatedly(
+        hass,
+        coordinator,
+        [PROXY_A, PROXY_B],
+        {PROXY_A: "timeout", PROXY_B: "timeout"},
+        BOND_EVICTION_FAILURES + 2,
+    )
+
+    assert entry.data[CONF_BONDED_SOURCES] == [PROXY_A, PROXY_B]
+    assert async_pairing_state(hass, MAC).auth_failures == {}
+
+
+async def test_evidence_still_never_empties_the_bonded_list(
+    hass: HomeAssistant,
+) -> None:
+    """Both paths proven dead: evict one, keep the last one regardless."""
+    entry = _entry(hass, **{CONF_BONDED_SOURCES: [PROXY_A, PROXY_B]})
+    coordinator = _coordinator(hass, entry, _controller())
+
+    await _refuse_with_evidence_repeatedly(
+        hass,
+        coordinator,
+        [PROXY_A, PROXY_B],
+        {PROXY_A: "rejected", PROXY_B: "rejected"},
+        BOND_EVICTION_FAILURES + 3,
+    )
+
+    assert entry.data[CONF_BONDED_SOURCES] == [PROXY_B]
+
+
+async def test_a_multi_path_refusal_evicts_nothing(hass: HomeAssistant) -> None:
+    """Without a per-path verdict, tried_sources is flat: a 2-path round
+    cannot say WHICH path refused.
+
+    pymadoka <= 0.3.9 reports the round, not a per-path verdict, so
+    attribution is impossible here. Under-evicting costs a few futile retries;
+    over-evicting deletes the one path that still works.
     """
     entry = _entry(hass, **{CONF_BONDED_SOURCES: [PROXY_A, PROXY_B]})
     coordinator = _coordinator(hass, entry, _controller())
