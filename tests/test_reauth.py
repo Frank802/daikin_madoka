@@ -68,11 +68,18 @@ def _controller(rounds: int = 0) -> MagicMock:
     return controller
 
 
-def _entry(hass: HomeAssistant, **data) -> MockConfigEntry:
+def _entry(
+    hass: HomeAssistant, loaded: bool = True, **data
+) -> MockConfigEntry:
+    """A configured entry. Since P1.1 a configured device always loads, so
+    LOADED is the state a polling coordinator is really in - and the state the
+    reauth trigger requires."""
     entry = MockConfigEntry(
         domain=DOMAIN, data={CONF_MAC: MAC, **data}, unique_id=MAC, title="Salon"
     )
     entry.add_to_hass(hass)
+    if loaded:
+        entry.mock_state(hass, config_entries.ConfigEntryState.LOADED)
     return entry
 
 
@@ -155,7 +162,9 @@ async def test_the_entry_stays_loaded_while_reauth_is_pending(
     leave the device with no entities at all - the catch-22 again - and would
     also stop the coordinator rescheduling itself.
     """
-    entry = _entry(hass)
+    # Real setup: HA moves the entry through SETUP_IN_PROGRESS itself, which is
+    # the state the first refresh runs in.
+    entry = _entry(hass, loaded=False)
     controller = _controller(rounds=0)
     controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [SOURCE]))
     controller.stop = AsyncMock()
@@ -303,3 +312,28 @@ async def test_reauth_aborts_on_a_legacy_multi_device_entry(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_legacy"
+
+
+async def test_no_reauth_flow_for_an_entry_that_is_not_running(
+    hass: HomeAssistant, enable_bluetooth: None
+) -> None:
+    """A prompt must not outlive the entry it belongs to.
+
+    Since the unconditional degraded load a configured device is always
+    LOADED (or SETUP_IN_PROGRESS during its first refresh), so any other state
+    means the entry is on its way out - being unloaded, reloaded or removed -
+    and asking the user to walk to the thermostat for it would be noise.
+    """
+    entry = _entry(hass, loaded=False)
+    controller = _controller(rounds=0)
+    controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [SOURCE]))
+    coordinator = _coordinator(hass, entry, controller)
+    present, scanner = _patched_bluetooth()
+
+    with present, scanner:
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert _reauth_flows(hass) == []
+    # The quarantine itself is still recorded: only the prompt is withheld.
+    assert async_pairing_state(hass, MAC).suspended is True

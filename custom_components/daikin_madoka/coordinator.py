@@ -11,7 +11,7 @@ from pymadoka import ConnectionException, Controller, PairingRequiredError
 from pymadoka.connection import ConnectionStatus
 
 from homeassistant.components import bluetooth
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -722,9 +722,20 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         Reconnect button rather than instead of it — two independent ways out,
         one of which survives having no dashboard and no entities.
         """
-        if self.config_entry is None:
+        entry = self.config_entry
+        if entry is None:
             return
-        self.config_entry.async_start_reauth(self.hass)
+        if entry.state not in (
+            ConfigEntryState.LOADED,
+            ConfigEntryState.SETUP_IN_PROGRESS,
+        ):
+            # Nothing is running to re-authenticate. Since P1.1 a configured
+            # device always loads, so these are the only two states a polling
+            # coordinator can legitimately be in; anything else means the entry
+            # is on its way out (unloading, being removed) and a pairing prompt
+            # would outlive the thing it belongs to.
+            return
+        entry.async_start_reauth(self.hass)
 
     @callback
     def _note_pairing_failure(self, err: PairingRequiredError) -> None:
