@@ -1,5 +1,40 @@
 # Changelog
 
+## v3.8.0 - July 2026
+
+**A thermostat can no longer become unrecoverable.** This release rewrites the connection, pairing and recovery layer after a full review of it. Three field incidents drove it: a thermostat with a perfectly good bond was quarantined as "refused the pairing" and locked out; two others ended up in `setup_retry`, where *every* entity vanishes — including the **Reconnect** button the integration's own notification tells you to press; and neither could be re-paired by any documented route, because the 60-second "walk to the thermostat" budget was nested inside a 30-second connect budget and was silently cancelled at ~28 s.
+
+### A pairing timeout is no longer treated as a refusal
+
+A bond is per-proxy, and automatic reconnects only ever use proxies known to hold one. On such a path nobody has to touch the thermostat, so a pairing *timeout* there means congestion — not a lost bond. Only an explicit refusal now quarantines a device. A run of timeouts instead slows the retry cadence right down and raises a plain warning that says pairing is not completing, without accusing the thermostat of anything.
+
+The pairing budgets were re-derived so this can actually be measured: each budget is now sized against the number of proxies that will be tried, so the attempt always fits inside the connect budget. Previously, with two or more proxies in range, no verdict could ever form at all. A retry-cadence brake also engages on repeated failure regardless of the verdict, so a thermostat that never answers is polled every 15 minutes rather than every minute.
+
+### Recovery is always reachable
+
+- A configured thermostat now **always loads**, degraded when it cannot connect, instead of disappearing into `setup_retry`. Its entities exist and read `unavailable` — the Reconnect button among them.
+- A new **re-pairing flow** appears on the integration entry after a genuine refusal, with a Fix button, and works even when no entity is available. It reports success or failure instead of leaving you guessing.
+- Every pairing flow — initial setup, Reconnect, re-pairing — now gets a real human-sized budget.
+- The pairing window is bounded and always closes. A failed Reconnect used to leave it open forever, which quietly disarmed the quarantine and lifted the bonded-proxy restriction.
+- The verdict and failure counter survive a restart, and are purged when the entry is removed.
+
+### Seeing what is going on
+
+- New **Connection status** sensor: `connected`, `retrying`, `pairing not completing`, `pairing required`, `not advertising`.
+- **Connection source** is now enabled by default, and it and the signal-strength sensor stay available when the link is down — they read Home Assistant's own data and never needed the thermostat.
+- Diagnostics no longer crash for a thermostat that never connected, and error messages no longer end in a bare colon.
+- Proxies with no free connection slot are tried last, so a saturated proxy stops blocking a thermostat while others sit idle.
+- Bonds are recorded as soon as pairing succeeds, and a proxy that keeps refusing is dropped — never the last one.
+- Renaming a thermostat no longer wipes its list of bonded proxies.
+
+### Madoka Card 0.7.0 → 0.7.1
+
+The card no longer reports a successful reconnect that never happened: it shows a real pending state while the call is in flight, and a visible error if it fails. Hard-refresh your browser once after updating.
+
+### ESPHome component — breaking change
+
+The dual setpoint was hardcoded, so the ESP32 entity always exposed two temperatures regardless of the thermostat's range setting. It is now the `dual_setpoint:` option, **defaulting to a single setpoint**. If you rely on the dual UI — or call `climate.set_temperature` with `target_temp_low`/`target_temp_high` on an ESPHome Madoka entity — add `dual_setpoint: true` to the climate block and recompile. Home Assistant's own integration is unaffected; it already switched automatically.
+
 ## v3.7.1 - July 2026
 
 **No more false "pairing required" quarantine on a Home Assistant restart.** Right after a restart the Bluetooth proxies are briefly congested, so a *valid* bond's SMP encryption runs slowly. The tight 8 s pairing budget could then time out and be misread as a lost bond, quarantining a thermostat that was never actually unbonded — typically one reached through a single, busy proxy. During the post-restart window the pairing budget is now widened (30 s) so a slow-but-valid bond has room to complete, then reverts to the tight budget once the device is back. A genuinely dead bond (an outright authentication rejection) still quarantines immediately, and the manual **Reconnect** window is unchanged.
