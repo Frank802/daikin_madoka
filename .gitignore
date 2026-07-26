@@ -147,6 +147,11 @@ POST_HA*
 AGENTS.md
 CONTEXT.md
 
+# ESPHome build output. `esphome compile esphome/tests/*.yaml` drops a
+# .esphome/ tree (generated C++, PlatformIO project, firmware binaries) next
+# to the configuration it built.
+.esphome/
+
 # Local BLE captures dropped in the working tree while debugging a pairing
 # problem (bluetoothctl / btmon transcripts). Never tracked, never shipped, and
 # they contain the MACs of whatever was in range.

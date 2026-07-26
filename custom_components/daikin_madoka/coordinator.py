@@ -365,9 +365,14 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # pairing situation rather than an ordinary dropout.
         self._pairing = async_pairing_state(hass, controller.connection.address)
         # Resume the all-paths-timed-out streak on the freshly built
-        # Connection (private attribute: pymadoka only exposes a read-only
-        # property; async_reconnect already pokes sibling privates).
-        controller.connection._pairing_timeout_rounds = self._pairing.timeout_rounds
+        # Connection. pymadoka >= 0.3.10 exposes a supported setter for this;
+        # before that the read-only property left no option but the private
+        # attribute (async_reconnect already pokes sibling privates).
+        resume = getattr(controller.connection, "resume_pairing_timeout_rounds", None)
+        if callable(resume):
+            resume(self._pairing.timeout_rounds)
+        else:
+            controller.connection._pairing_timeout_rounds = self._pairing.timeout_rounds
         super().__init__(
             hass,
             _LOGGER,
@@ -799,19 +804,45 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         Only reached from the PROVEN-rejection branch: a timeout streak is an
         inference and must never cost a bond.
 
-        Attribution is the hard part. PairingRequiredError.tried_sources is a
-        flat list with no per-path verdict, so a round over three proxies cannot
-        say WHICH of them rejected — the library only reports that the round as a
-        whole ended in a rejection. A single-source round is unambiguous and is
-        attributed; anything else records nothing. Under-evicting merely costs a
-        few futile retries on a dead path, while over-evicting deletes the one
-        path that still works and needs a human at the thermostat to restore.
-        (Upstream: PairingRequiredError needs a per-path verdict — see
-        docs/plans/2026-07-26-connection-layer-review.md, section 7.)
+        Attribution is the hard part. Since 0.3.10 the library reports a
+        per-path verdict in `err.evidence`, so every source it marks
+        "rejected" is individually proven and can be charged — which is what
+        makes eviction reachable at all in a home with three or four proxies,
+        where a round is never single-path.
+
+        Without that verdict (pymadoka <= 0.3.9) tried_sources is a flat list:
+        a round over three proxies cannot say WHICH of them rejected, so only
+        a single-source round is unambiguous and anything else records
+        nothing. Under-evicting merely costs a few futile retries on a dead
+        path, while over-evicting deletes the one path that still works and
+        needs a human at the thermostat to restore.
         """
+        for source in self._attributable_refusals(err):
+            self._async_charge_bond_refusal(source)
+
+    @callback
+    def _attributable_refusals(self, err: PairingRequiredError) -> list[str]:
+        """The sources this error PROVES hold no bond, if any."""
+        evidence = getattr(err, "evidence", None)
+        if isinstance(evidence, Mapping):
+            # Only "rejected" counts: a per-path "timeout" is congestion until
+            # proven otherwise, exactly as a whole-round timeout streak is.
+            proven = [
+                source
+                for source, verdict in evidence.items()
+                if verdict == "rejected" and source
+            ]
+            if proven:
+                return proven
+            # An empty/verdict-less mapping says nothing; fall through to the
+            # legacy rule rather than treating silence as exoneration.
         if len(err.tried_sources) != 1 or not err.tried_sources[0]:
-            return
-        source = err.tried_sources[0]
+            return []
+        return [err.tried_sources[0]]
+
+    @callback
+    def _async_charge_bond_refusal(self, source: str) -> None:
+        """Record one proven refusal against a proxy, evicting past threshold."""
         # Clamped: past the threshold a bigger number changes nothing, and the
         # clamp is what stops a device whose eviction is blocked (last bonded
         # path) from rewriting the config entry on every poll, forever.
@@ -984,26 +1015,56 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         if isinstance(rounds, int) and not isinstance(rounds, bool):
             self._pairing.timeout_rounds = max(self._pairing.timeout_rounds, rounds)
 
+    def _timed_out_rounds(self, err: PairingRequiredError) -> int:
+        """How many all-timed-out rounds are behind this verdict, for the log.
+
+        0.3.10 states it on the error; before that, the connection's counter
+        was the only source and it is stale as soon as the library resets it.
+        """
+        rounds = getattr(err, "timeout_rounds", None)
+        if isinstance(rounds, int) and not isinstance(rounds, bool) and rounds > 0:
+            return rounds
+        rounds = getattr(self.controller.connection, "pairing_timeout_rounds", None)
+        if isinstance(rounds, int) and not isinstance(rounds, bool) and rounds > 0:
+            return rounds
+        return PAIRING_TIMEOUT_ROUNDS
+
     @callback
     def _async_note_pairing_error(self, err: PairingRequiredError) -> None:
         """Decide what a PairingRequiredError actually proves, and react.
 
-        pymadoka raises the same exception, with the same message and
-        attributes, for two epistemically different events: a path that
-        explicitly REJECTED the authenticated bond (a human must re-pair) and
-        every path merely TIMING OUT for PAIRING_TIMEOUT_ROUNDS rounds (an
-        inference congestion alone can produce). The only side channel is the
-        public round counter: the rejection raise resets it to 0, the streak
-        raise leaves it at the threshold. It is undocumented and fragile, so
-        anything we cannot read as an integer takes the non-convicting branch
-        — a wrong quarantine needs a human at the thermostat to undo, a wrong
-        backoff only costs time. The robust fix is upstream: a `reason`
-        attribute on PairingRequiredError (see docs/plans, section 7).
+        pymadoka raises the same exception for two epistemically different
+        events: a path that explicitly REJECTED the authenticated bond (a
+        human must re-pair) and every path merely TIMING OUT for
+        PAIRING_TIMEOUT_ROUNDS rounds (an inference congestion alone can
+        produce).
+
+        Since 0.3.10 the library says which it is, in `err.reason`, and that
+        is the only thing worth reading: it is the raise site's own verdict
+        rather than something reconstructed from a side effect.
+
+        Before 0.3.10 (0.3.9 is the pinned version) there was no verdict, only
+        the public round counter — reset to 0 by the rejection raise, left at
+        the threshold by the streak raise. Undocumented and fragile, and note
+        that 0.3.10 resets it at BOTH sites, so reading it there would invert
+        the diagnosis: `reason` must be consulted FIRST, and the counter only
+        when the attribute is absent.
+
+        Anything we can read neither way takes the non-convicting branch — a
+        wrong quarantine needs a human at the thermostat to undo, a wrong
+        backoff only costs time.
         """
-        rounds = getattr(self.controller.connection, "pairing_timeout_rounds", None)
-        proven_rejection = (
-            isinstance(rounds, int) and not isinstance(rounds, bool) and rounds == 0
-        )
+        reason = getattr(err, "reason", None)
+        if isinstance(reason, str):
+            # A reason we do not recognise is not evidence of a refusal.
+            proven_rejection = reason == "rejected"
+        else:
+            rounds = getattr(
+                self.controller.connection, "pairing_timeout_rounds", None
+            )
+            proven_rejection = (
+                isinstance(rounds, int) and not isinstance(rounds, bool) and rounds == 0
+            )
         if proven_rejection:
             self._note_pairing_failure(err)
             self._async_evict_dead_bond(err)
@@ -1014,7 +1075,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             "%s did not complete pairing after %s timed-out rounds; slowing "
             "reconnects to %ss instead of concluding it refused the bond",
             self.address,
-            rounds if isinstance(rounds, int) else PAIRING_TIMEOUT_ROUNDS,
+            self._timed_out_rounds(err),
             TIMEOUT_BACKOFF_INTERVAL_S,
         )
         self._note_timeout_rounds()

@@ -131,10 +131,13 @@ external_components:
   - source:
       type: git
       url: https://github.com/dasimon135/daikin_madoka
-      ref: v2.2.0
+      ref: v3.8.0
       path: esphome/components
     components: [madoka]
 
+# The BRC1H only accepts an authenticated (MITM) link, established through a
+# numeric comparison. Both lines below are required — see the note after this
+# config for what happens if either is missing.
 esp32_ble:
   io_capability: display_yes_no
 
@@ -147,6 +150,13 @@ esp32_ble_tracker:
 ble_client:
   - mac_address: "AA:BB:CC:DD:EE:FF"
     id: my_madoka
+    # Answers the thermostat's numeric-comparison request. Without this the
+    # pairing starts, nothing confirms it, and the link fails.
+    on_numeric_comparison_request:
+      then:
+        - ble_client.numeric_comparison_reply:
+            id: my_madoka
+            accept: true
     on_disconnect:
       then:
         - delay: 10s
@@ -158,6 +168,28 @@ climate:
     ble_client_id: my_madoka
     update_interval: 15s
 ```
+
+> ### Pairing: why both lines matter
+>
+> The BRC1H pairs by **numeric comparison** — both sides show a 6-digit code
+> and each confirms it matches. It silently ignores every command, and even
+> notification subscriptions, on an unauthenticated link.
+>
+> - **`io_capability: display_yes_no`** lets the ESP32 take part in that
+>   exchange at all. The default (`none`) cannot, and `keyboard` offers
+>   passkey *entry* — a different pairing model the thermostat never asks for.
+> - **`on_numeric_comparison_request`** answers it. Without the responder the
+>   pairing starts, the confirmation is never given, and the connection ends
+>   as `AuthenticationCanceled` — often without any prompt appearing on the
+>   thermostat screen.
+>
+> On the first connection the thermostat shows the pairing prompt: accept it
+> within a few seconds. The bond is stored on the ESP32 and survives reboots.
+>
+> **If pairing already failed several times**, the BRC1H's Bluetooth stack
+> stays jammed and will refuse even a correct configuration. On the
+> thermostat: Bluetooth menu → forget the pairing, then toggle Bluetooth off
+> and on again before retrying.
 
 ### Optional entities
 
