@@ -42,18 +42,54 @@ def entry_macs(entry: ConfigEntry) -> list[str]:
     return [normalize_mac(mac) or mac for mac in raw_macs]
 
 
+def _has_free_slot(scanner_device: "bluetooth.BluetoothScannerDevice") -> bool:
+    """True unless the scanner positively reports zero free connection slots.
+
+    An ESPHome proxy serves a fixed number of simultaneous connections (3 by
+    default) and refuses every connect once they are taken — and HA core issue
+    #176516 can leave those slots allocated to connections that no longer exist.
+    A saturated proxy therefore fails instantly and repeatedly, which is exactly
+    what happened in the field: one proxy at 3/3 blocked a thermostat while
+    three idle proxies were never tried.
+
+    Read defensively and default to True. Local adapters, older habluetooth
+    releases and any scanner that simply does not track allocations return
+    nothing here; "unknown" must mean "assume usable", or a backend that never
+    reports would see all of its paths demoted for no reason.
+    """
+    scanner = getattr(scanner_device, "scanner", None)
+    get_allocations = getattr(scanner, "get_allocations", None)
+    if not callable(get_allocations):
+        return True
+    try:
+        allocations = get_allocations()
+    except Exception:  # noqa: BLE001 - a diagnostics read must never break connecting
+        return True
+    free = getattr(allocations, "free", None)
+    if not isinstance(free, int) or isinstance(free, bool):
+        return True
+    return free > 0
+
+
 def build_candidates(
     hass: HomeAssistant,
     address: str,
     preferred_source: str | None,
     allowed_sources: list[str] | None = None,
 ) -> list[BLEDevice]:
-    """Ordered BLEDevice paths to the device: preferred proxy first, then RSSI.
+    """Ordered BLEDevice paths: free slots first, then preferred proxy, then RSSI.
 
     Feeds pymadoka's candidates_callback so the connection tries the proxy
     that last authenticated successfully before letting signal strength pick.
     Without the sticky ordering, an unbonded proxy that happens to win on RSSI
     is tried first and the BRC1H silently refuses it.
+
+    A proxy with no free connection slot is demoted ahead of that, sticky or
+    not: it cannot accept a connection at all, so offering it first burns the
+    per-candidate attempt (and, through a proxy, ~20s of the connect budget)
+    before the paths that could have worked are even reached. Demoted, never
+    excluded — the slot count is a hint that some backends do not provide, and a
+    saturated proxy may free a slot by the time we reach it.
 
     ``allowed_sources`` restricts the result to proxies known to hold a bond.
     Reaching an unbonded proxy starts a real pairing, which needs a human at
@@ -74,7 +110,7 @@ def build_candidates(
             and sd.ble_device.details.get("source") in allowed
         ]
 
-    def sort_key(sd: bluetooth.BluetoothScannerDevice) -> tuple[int, int]:
+    def sort_key(sd: bluetooth.BluetoothScannerDevice) -> tuple[int, int, int]:
         # details is backend-specific: ESPHome proxies expose their source MAC
         # in a dict; other backends may carry something else (or nothing).
         source = None
@@ -88,6 +124,10 @@ def build_candidates(
             if sd.advertisement and sd.advertisement.rssi is not None
             else -127
         )
-        return (0 if preferred_source and source == preferred_source else 1, -rssi)
+        return (
+            0 if _has_free_slot(sd) else 1,
+            0 if preferred_source and source == preferred_source else 1,
+            -rssi,
+        )
 
     return [sd.ble_device for sd in sorted(scanner_devices, key=sort_key)]
