@@ -38,6 +38,17 @@ external_components:
       path: esphome_components  # Chemin relatif depuis le dossier de config ESPHome
     components: [ madoka ]
 
+# Appairage authentifié (MITM) — OBLIGATOIRE pour le BRC1H.
+# Le thermostat ignore silencieusement toute commande sur un lien non
+# authentifié. Il s'appaire par comparaison numérique : les deux côtés
+# affichent un code à 6 chiffres et chacun confirme qu'il correspond.
+# La valeur par défaut (none) ne peut pas y participer, et keyboard propose
+# la saisie d'un code — un modèle d'appairage que le thermostat ne demande
+# jamais. Voir aussi le répondeur on_numeric_comparison_request plus bas :
+# les deux sont nécessaires.
+esp32_ble:
+  io_capability: display_yes_no
+
 # Configuration Bluetooth ESP32
 esp32_ble_tracker:
   id: ble_tracker       # Requis pour le switch de ré-appairage (voir ci-dessous)
@@ -53,6 +64,15 @@ ble_client:
   # Premier thermostat
   - mac_address: "F0:B3:1E:87:AF:FE"  # Remplacez par votre adresse MAC
     id: madoka_salon
+    # Répond à la demande de comparaison numérique du thermostat. Sans ce
+    # bloc, l'appairage démarre, rien ne le confirme, et la connexion échoue
+    # en AuthenticationCanceled — souvent sans qu'aucune invite n'apparaisse
+    # à l'écran du thermostat.
+    on_numeric_comparison_request:
+      then:
+        - ble_client.numeric_comparison_reply:
+            id: madoka_salon
+            accept: true
     on_disconnect:
       then:
         # Reconnexion automatique seulement si le proxy est actif
@@ -65,6 +85,11 @@ ble_client:
   # Deuxième thermostat (optionnel)
   - mac_address: "1C:54:9E:90:E3:0E"  # Remplacez par votre adresse MAC
     id: madoka_chambre
+    on_numeric_comparison_request:
+      then:
+        - ble_client.numeric_comparison_reply:
+            id: madoka_chambre
+            accept: true
     on_disconnect:
       then:
         - if:
