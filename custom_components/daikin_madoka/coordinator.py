@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from pymadoka import ConnectionException, Controller, PairingRequiredError
 from pymadoka.connection import ConnectionStatus
@@ -21,6 +23,7 @@ from .const import (
     BRC1H_NAME_PREFIX,
     CONF_BONDED_SOURCES,
     CONF_MAC,
+    CONF_PAIRING_STATE,
     CONF_PREFERRED_SOURCE,
     CONNECT_TIMEOUT,
     DOMAIN,
@@ -119,6 +122,63 @@ class MadokaPairingState:
     # the device is still probed, just far more slowly. Survives the
     # coordinator rebuild for the same reason timeout_rounds does.
     backoff: bool = False
+    # Consecutive failed polls. Shared, not per-coordinator: HA builds a fresh
+    # coordinator on every setup retry and each one performs exactly one
+    # refresh, so an instance attribute could never reach UNREACHABLE_THRESHOLD
+    # and the device_unreachable repair could never fire — two dead thermostats
+    # produced zero notifications (field incident 2026-07-26).
+    fail_count: int = 0
+
+    def as_stored(self) -> dict[str, Any] | None:
+        """Serialize the durable part of the verdict, or None if it is empty.
+
+        pairing_window is deliberately absent: a window is permission for one
+        deliberate attempt by a user who is standing at the thermostat, so it
+        must never be restored by a restart. An all-default verdict serializes
+        to None so a healthy device stores nothing at all.
+        """
+        stored: dict[str, Any] = {}
+        if self.suspended:
+            stored["suspended"] = True
+        if self.backoff:
+            stored["backoff"] = True
+        if self.timeout_rounds:
+            stored["timeout_rounds"] = self.timeout_rounds
+        if self.fail_count:
+            # Clamped: past the threshold a larger number changes nothing, and
+            # the clamp is what stops a permanently dead device from rewriting
+            # the config entry on every single poll.
+            stored["fail_count"] = min(self.fail_count, UNREACHABLE_THRESHOLD)
+        if self.last_error is not None:
+            stored["last_error"] = {
+                "tried_sources": list(self.last_error.tried_sources)
+            }
+        return stored or None
+
+    @classmethod
+    def from_stored(
+        cls, address: str, stored: Mapping[str, Any]
+    ) -> "MadokaPairingState":
+        """Rebuild a verdict persisted by as_stored()."""
+
+        def _count(key: str) -> int:
+            value = stored.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+        last_error = None
+        raw_error = stored.get("last_error")
+        if isinstance(raw_error, Mapping):
+            sources = raw_error.get("tried_sources")
+            last_error = PairingRequiredError(
+                address, list(sources) if isinstance(sources, list) else []
+            )
+        return cls(
+            last_error=last_error,
+            timeout_rounds=_count("timeout_rounds"),
+            suspended=bool(stored.get("suspended")),
+            backoff=bool(stored.get("backoff")),
+            fail_count=_count("fail_count"),
+        )
 
 
 def async_pairing_state(hass: HomeAssistant, address: str) -> MadokaPairingState:
@@ -127,6 +187,54 @@ def async_pairing_state(hass: HomeAssistant, address: str) -> MadokaPairingState
         PAIRING_STATE_KEY, {}
     )
     return store.setdefault(address, MadokaPairingState())
+
+
+@callback
+def async_restore_pairing_state(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Rehydrate the verdicts this entry persisted, once per MAC.
+
+    Without this an HA restart forgets everything the integration concluded
+    about a bond: the quarantine silently disarms itself and the whole
+    diagnosis has to be re-derived from scratch, at poll cadence, while the
+    thermostat is prompted again. A MAC that already has a live state is left
+    alone — memory always wins, so a reload can never resurrect a quarantine
+    that a successful connect cleared just before it.
+    """
+    stored = entry.data.get(CONF_PAIRING_STATE)
+    if not isinstance(stored, Mapping):
+        return
+    store: dict[str, MadokaPairingState] = hass.data.setdefault(PAIRING_STATE_KEY, {})
+    for address, raw in stored.items():
+        if address in store or not isinstance(raw, Mapping):
+            continue
+        store[address] = MadokaPairingState.from_stored(address, raw)
+
+
+@callback
+def async_forget_pairing_state(
+    hass: HomeAssistant, entry: ConfigEntry, address: str, *, persisted: bool = True
+) -> None:
+    """Drop a device's verdict from memory, and optionally from the entry.
+
+    persisted=False is the unload case: the entry keeps its durable shadow (the
+    next setup rehydrates it) but the live copy goes, so an entry that is
+    deleted and re-added starts from a clean slate — the user's last-resort
+    escape hatch out of a wrong quarantine.
+    """
+    store: dict[str, MadokaPairingState] = hass.data.get(PAIRING_STATE_KEY) or {}
+    store.pop(address, None)
+    if not persisted:
+        return
+    saved = entry.data.get(CONF_PAIRING_STATE)
+    if not isinstance(saved, Mapping) or address not in saved:
+        return
+    remaining = {key: value for key, value in saved.items() if key != address}
+    data = {**entry.data}
+    if remaining:
+        data[CONF_PAIRING_STATE] = remaining
+    else:
+        data.pop(CONF_PAIRING_STATE, None)
+    hass.config_entries.async_update_entry(entry, data=data)
 
 # Typed config entry: runtime_data maps each normalized MAC to its coordinator.
 type MadokaConfigEntry = ConfigEntry[dict[str, "MadokaCoordinator"]]
@@ -147,7 +255,6 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # The BLE stack overwrites controller.connection.name with the
         # advertised local name ("Daikin"), so keep the user's chosen name here.
         self._friendly_name = friendly_name
-        self._fail_count = 0
         self._issue_active = False
         self._pairing_issue_active = False
         self._pairing_slow_issue_active = False
@@ -187,12 +294,24 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             self._async_arm_pairing_window_timer()
 
     async def _async_update_data(self) -> dict:
+        """Poll the device, persisting whatever the attempt established."""
+        try:
+            return await self._async_update_data_inner()
+        finally:
+            # Every branch below mutates the shared verdict (failure counter,
+            # suspension, backoff), and every mutation must reach the durable
+            # copy — including the clearing a success performs. A persisted
+            # quarantine that a later success could not erase would be worse
+            # than no persistence at all.
+            self._async_persist_pairing_state()
+
+    async def _async_update_data_inner(self) -> dict:
         """Poll the device, tracking sustained failures for a repair issue."""
         try:
             data = await self._async_poll()
         except UpdateFailed as err:
-            self._fail_count += 1
-            if self._fail_count >= UNREACHABLE_THRESHOLD:
+            self._pairing.fail_count += 1
+            if self._pairing.fail_count >= UNREACHABLE_THRESHOLD:
                 self._raise_unreachable_issue()
             # Stale-value grace: a short BLE micro-drop should not punch holes
             # in graphs or flip entities unavailable, so the first STALE_GRACE
@@ -210,13 +329,13 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             # while an ERROR repair is on screen.
             if (
                 self.last_update_success
-                and self._fail_count <= STALE_GRACE
+                and self._pairing.fail_count <= STALE_GRACE
                 and self.data
                 and not isinstance(err.__cause__, PairingRequiredError)
             ):
                 _LOGGER.debug(
                     "Poll %d/%d failed for %s, serving stale data: %s",
-                    self._fail_count,
+                    self._pairing.fail_count,
                     STALE_GRACE,
                     self.address,
                     err,
@@ -225,7 +344,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
                 # repair issues untouched.
                 return self.data
             raise
-        self._fail_count = 0
+        self._pairing.fail_count = 0
         self._clear_issues()
         # Full clear only here: an unload (which also runs _clear_issues via
         # async_shutdown_extras) must NOT lift the suspension, or a simple
@@ -378,12 +497,45 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # no bond yet, and widen the pairing budget so a human can actually
         # compare codes and confirm.
         self._clear_pairing_suspension()
+        self._async_persist_pairing_state()
         self._async_open_pairing_window()
         # The BRC1H stops advertising while connected and takes a moment to
         # resume after a disconnect; refreshing instantly would fail fast with
         # "not advertising" and defer the reconnect to the next poll.
         await asyncio.sleep(3)
         await self.async_request_refresh()
+
+    @callback
+    def _async_persist_pairing_state(self) -> None:
+        """Mirror the shared verdict into the config entry.
+
+        hass.data keeps the verdict across a coordinator rebuild; only the
+        entry keeps it across an HA restart. Written on every change, so the
+        stored copy can never be more pessimistic than reality.
+        """
+        entry = self.config_entry
+        # A coordinator built outside a real entry (or against one that was
+        # removed mid-poll) has nothing to write to.
+        if entry is None or self.hass.config_entries.async_get_entry(
+            entry.entry_id
+        ) is None:
+            return
+        saved = entry.data.get(CONF_PAIRING_STATE)
+        saved = dict(saved) if isinstance(saved, Mapping) else {}
+        updated = dict(saved)
+        current = self._pairing.as_stored()
+        if current is None:
+            updated.pop(self.address, None)
+        else:
+            updated[self.address] = current
+        if updated == saved:
+            return
+        data = {**entry.data}
+        if updated:
+            data[CONF_PAIRING_STATE] = updated
+        else:
+            data.pop(CONF_PAIRING_STATE, None)
+        self.hass.config_entries.async_update_entry(entry, data=data)
 
     @callback
     def _async_persist_preferred_source(self) -> None:
@@ -686,7 +838,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
     @property
     def fail_count(self) -> int:
         """Consecutive failed polls (reset to 0 by a successful poll)."""
-        return self._fail_count
+        return self._pairing.fail_count
 
     @property
     def pairing_suspended(self) -> bool:

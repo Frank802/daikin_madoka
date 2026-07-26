@@ -12,7 +12,7 @@ from .coordinator import (
     MadokaCoordinator,
     MadokaPairingState,
 )
-from .util import normalize_mac
+from .util import entry_macs
 
 TO_REDACT = {CONF_MAC, CONF_DEVICES, "title", "unique_id"}
 
@@ -25,15 +25,6 @@ def _resolve_source(hass: HomeAssistant, source: str | None) -> str | None:
     return getattr(scanner, "name", None) or source
 
 
-def _entry_macs(entry: MadokaConfigEntry) -> list[str]:
-    """MACs an entry covers, whether or not it ever loaded."""
-    if CONF_MAC in entry.data:
-        raw_macs = [entry.data[CONF_MAC]]
-    else:
-        raw_macs = list(entry.data.get(CONF_DEVICES, []))
-    return [normalize_mac(mac) or mac for mac in raw_macs]
-
-
 def _pairing_states(hass: HomeAssistant, entry: MadokaConfigEntry) -> dict | None:
     """Pairing verdict per MAC, readable without a live coordinator.
 
@@ -43,7 +34,7 @@ def _pairing_states(hass: HomeAssistant, entry: MadokaConfigEntry) -> dict | Non
     """
     store: dict[str, MadokaPairingState] = hass.data.get(PAIRING_STATE_KEY, {})
     states = {}
-    for mac in _entry_macs(entry):
+    for mac in entry_macs(entry):
         state = store.get(mac)
         if state is None:
             continue
@@ -52,6 +43,7 @@ def _pairing_states(hass: HomeAssistant, entry: MadokaConfigEntry) -> dict | Non
             "backoff": state.backoff,
             "pairing_window": state.pairing_window,
             "timeout_rounds": state.timeout_rounds,
+            "fail_count": state.fail_count,
             "last_error": str(state.last_error) if state.last_error else None,
         }
     if not states:

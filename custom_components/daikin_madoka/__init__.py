@@ -21,10 +21,12 @@ from .const import (
 from .coordinator import (
     MadokaConfigEntry,
     MadokaCoordinator,
+    async_forget_pairing_state,
     async_pairing_state,
+    async_restore_pairing_state,
 )
 from .frontend import async_register_card
-from .util import build_candidates, normalize_mac
+from .util import build_candidates, entry_macs, normalize_mac
 
 COMPONENT_TYPES = ["climate", "sensor", "binary_sensor", "button", "number"]
 
@@ -78,6 +80,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
     _async_purge_orphan_devices(hass)
 
     await async_register_card(hass)
+
+    # Before any coordinator exists: what the integration concluded about this
+    # device's bond before the last restart drives the very first connect
+    # attempt (candidate restriction, poll cadence, quarantine).
+    async_restore_pairing_state(hass, entry)
 
     if CONF_MAC in entry.data:
         devices = [(entry.data[CONF_MAC], entry.data.get(CONF_FRIENDLY_NAME) or None)]
@@ -203,6 +210,13 @@ async def async_unload_entry(
         for coordinator in config_entry.runtime_data.values():
             coordinator.async_shutdown_extras()
             await _safe_stop(coordinator.controller)
+        # Drop the in-memory verdicts. The entry keeps its persisted copy, so
+        # a reload or a restart picks the diagnosis straight back up; but a
+        # DELETED entry takes that copy with it, so deleting and re-adding a
+        # thermostat now really does start from a clean slate — the escape
+        # hatch of last resort out of a quarantine the user disagrees with.
+        for mac in entry_macs(config_entry):
+            async_forget_pairing_state(hass, config_entry, mac, persisted=False)
 
     return unload_ok
 
@@ -220,4 +234,11 @@ async def async_remove_config_entry_device(
     # runtime_data is unset when the entry never finished setting up.
     coordinators = getattr(config_entry, "runtime_data", None) or {}
     macs = {mac for domain, mac in device_entry.identifiers if domain == DOMAIN}
-    return not (macs & set(coordinators))
+    if macs & set(coordinators):
+        return False
+    # The device is going: so must every verdict recorded against it, in
+    # memory and in the entry. A stale "suspended" left behind here would
+    # quarantine the replacement thermostat the moment it is added.
+    for mac in macs:
+        async_forget_pairing_state(hass, config_entry, mac)
+    return True

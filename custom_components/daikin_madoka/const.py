@@ -14,6 +14,14 @@ CONF_PREFERRED_SOURCE = "preferred_source"
 # BRC1H when repeated. Empty/absent means "not known yet" — treated as
 # unrestricted so a fresh install can still find its first path.
 CONF_BONDED_SOURCES = "bonded_sources"
+# Durable shadow of the per-MAC pairing verdict (suspended / backoff /
+# timeout streak / consecutive failures / last pairing error), keyed by MAC.
+# The live copy lives in hass.data so it survives a coordinator rebuild; this
+# copy makes it survive an HA restart as well, so a diagnosis reached at 2am
+# does not have to be re-derived — and, being entry data, it disappears with
+# the entry, which keeps delete-and-re-add working as the last-resort escape
+# hatch.
+CONF_PAIRING_STATE = "pairing_state"
 
 BRC1H_NAME_PREFIX = "BRC1H"
 

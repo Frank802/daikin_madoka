@@ -5,8 +5,12 @@ import re
 from bleak.backends.device import BLEDevice
 
 from homeassistant.components import bluetooth
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_DEVICES
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import format_mac
+
+from .const import CONF_MAC
 
 MAC_REGEX = re.compile(r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
@@ -22,6 +26,20 @@ def normalize_mac(mac: str) -> str | None:
     if not MAC_REGEX.match(normalized):
         return None
     return normalized
+
+
+def entry_macs(entry: ConfigEntry) -> list[str]:
+    """Normalized MACs an entry covers, whether or not it ever loaded.
+
+    New-style entries carry one MAC, legacy entries a list; both shapes are
+    read straight from entry.data so this works for an entry stuck in
+    setup_retry, one being unloaded, and one being removed.
+    """
+    if CONF_MAC in entry.data:
+        raw_macs = [entry.data[CONF_MAC]]
+    else:
+        raw_macs = list(entry.data.get(CONF_DEVICES, []))
+    return [normalize_mac(mac) or mac for mac in raw_macs]
 
 
 def build_candidates(
