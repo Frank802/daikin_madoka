@@ -75,6 +75,16 @@
       },
       "connection_source": {
         "name": "Fuente de conexión"
+      },
+      "connection_status": {
+        "name": "Estado de la conexión",
+        "state": {
+          "connected": "Conectado",
+          "retrying": "Reintentando",
+          "pairing_slow": "El emparejamiento no se completa",
+          "needs_pairing": "Requiere emparejamiento",
+          "not_advertising": "Ningún proxy lo detecta"
+        }
       }
     },
     "binary_sensor": {

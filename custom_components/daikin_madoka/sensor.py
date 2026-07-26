@@ -39,7 +39,28 @@ async def async_setup_entry(
         entities.append(MadokaRssiSensor(coordinator))
         entities.append(MadokaRuntimeSensor(coordinator))
         entities.append(MadokaConnectionSourceSensor(coordinator))
+        entities.append(MadokaConnectionStatusSensor(coordinator))
     async_add_entities(entities)
+
+
+class MadokaLinkSensor(MadokaEntity, SensorEntity):
+    """A diagnostic sensor that does not need the BLE link to answer.
+
+    Signal strength, serving proxy and connection status all come from Home
+    Assistant's own Bluetooth bookkeeping or from the coordinator's state, so
+    none of them needs a device round-trip. Inheriting the default
+    ``available = last_update_success`` made them go unavailable together with
+    everything else exactly when they were the only things worth reading — the
+    user was left with a wall of "unavailable" and no way to tell "out of
+    range" from "bond refused" without opening the logs.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def available(self) -> bool:
+        """Always: this entity reports ABOUT the link, it does not use it."""
+        return True
 
 
 class MadokaTemperatureSensor(MadokaEntity, SensorEntity):
@@ -82,14 +103,13 @@ class MadokaOutdoorSensor(MadokaTemperatureSensor):
         return self.controller.temperatures.status.outdoor
 
 
-class MadokaRssiSensor(MadokaEntity, SensorEntity):
+class MadokaRssiSensor(MadokaLinkSensor):
     """Bluetooth signal strength of the thermostat, from HA's BLE tracker."""
 
     _attr_translation_key = "rssi"
     _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: MadokaCoordinator) -> None:
@@ -106,18 +126,20 @@ class MadokaRssiSensor(MadokaEntity, SensorEntity):
         return service_info.rssi
 
 
-class MadokaConnectionSourceSensor(MadokaEntity, SensorEntity):
+class MadokaConnectionSourceSensor(MadokaLinkSensor):
     """Which BLE path (ESPHome proxy or local adapter) serves the thermostat.
 
     While connected, reports the live connection's source scanner; otherwise
     falls back to the persisted preferred source (the proxy that last
     authenticated, primed for the next reconnect). Useful in multi-proxy
     homes to see which proxy each thermostat is bonded through.
+
+    Enabled by default: a bond belongs to ONE proxy, so "which proxy" is half
+    of every pairing diagnosis, and an entity the user has to go and enable
+    first is not available at the moment they need it.
     """
 
     _attr_translation_key = "connection_source"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: MadokaCoordinator) -> None:
         super().__init__(coordinator, "connection_source")
@@ -139,6 +161,52 @@ class MadokaConnectionSourceSensor(MadokaEntity, SensorEntity):
         entry = self.coordinator.config_entry
         preferred = entry.data.get(CONF_PREFERRED_SOURCE) if entry else None
         return self._display_name(preferred) if preferred else None
+
+
+class MadokaConnectionStatusSensor(MadokaLinkSensor):
+    """Why the thermostat is (not) reachable, in one always-readable state.
+
+    Every other signal in the integration collapses to "unavailable" when the
+    link is down, which is precisely when the user needs to know WHICH failure
+    they are looking at: a thermostat out of range and a thermostat whose bond
+    was refused look identical on the dashboard but need opposite remedies
+    (move a proxy / stand at the device and re-pair). This is that
+    distinction, without opening the logs.
+    """
+
+    _attr_translation_key = "connection_status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [
+        "connected",
+        "retrying",
+        "pairing_slow",
+        "needs_pairing",
+        "not_advertising",
+    ]
+
+    def __init__(self, coordinator: MadokaCoordinator) -> None:
+        super().__init__(coordinator, "connection_status")
+
+    @property
+    def native_value(self) -> str:
+        """Return the most specific diagnosis that currently applies."""
+        coordinator = self.coordinator
+        if (
+            self.controller.connection.connection_status is ConnectionStatus.CONNECTED
+            and coordinator.last_update_success
+        ):
+            return "connected"
+        # Ordered by how much they are known, not by how bad they are: a
+        # proven refusal outranks an inference, which outranks an absence.
+        if coordinator.pairing_suspended:
+            return "needs_pairing"
+        if coordinator.pairing_backoff or coordinator.pairing_slow_issue_active:
+            return "pairing_slow"
+        if not bluetooth.async_address_present(
+            self.hass, coordinator.address, connectable=True
+        ):
+            return "not_advertising"
+        return "retrying"
 
 
 class MadokaRuntimeSensor(MadokaEntity, RestoreSensor):

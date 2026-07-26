@@ -12,6 +12,19 @@
       },
       "operating_time": {
         "default": "mdi:timer-play-outline"
+      },
+      "connection_source": {
+        "default": "mdi:transit-connection-variant"
+      },
+      "connection_status": {
+        "default": "mdi:bluetooth-settings",
+        "state": {
+          "connected": "mdi:bluetooth-connect",
+          "retrying": "mdi:bluetooth-transfer",
+          "pairing_slow": "mdi:bluetooth-transfer",
+          "needs_pairing": "mdi:bluetooth-off",
+          "not_advertising": "mdi:bluetooth-off"
+        }
       }
     },
     "binary_sensor": {

@@ -75,6 +75,16 @@
       },
       "connection_source": {
         "name": "Connection source"
+      },
+      "connection_status": {
+        "name": "Connection status",
+        "state": {
+          "connected": "Connected",
+          "retrying": "Retrying",
+          "pairing_slow": "Pairing not completing",
+          "needs_pairing": "Needs pairing",
+          "not_advertising": "Not seen by any proxy"
+        }
       }
     },
     "binary_sensor": {
