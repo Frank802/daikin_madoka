@@ -146,3 +146,10 @@ POST_HA*
 .claude/
 AGENTS.md
 CONTEXT.md
+
+# Local BLE captures dropped in the working tree while debugging a pairing
+# problem (bluetoothctl / btmon transcripts). Never tracked, never shipped, and
+# they contain the MACs of whatever was in range.
+bluez.txt
+*.btsnoop
+btmon*.log
