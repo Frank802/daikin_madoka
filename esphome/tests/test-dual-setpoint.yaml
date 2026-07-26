@@ -1,0 +1,47 @@
+# Compile-check configuration: madoka climate entity with the two-point
+# setpoint enabled (dual_setpoint: true), i.e. the BRC1H "range" mode.
+#
+# This file exists so `esphome config` / `esphome compile` can prove the
+# external component still builds. It is not a deployable configuration:
+# there is no wifi/api/ota block and the MAC address is a placeholder.
+
+esphome:
+  name: madoka-dual-setpoint
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [madoka]
+
+esp32_ble_tracker:
+  id: ble_tracker
+
+ble_client:
+  - mac_address: "F0:B3:1E:87:AF:FE"
+    id: madoka_test
+
+climate:
+  - platform: madoka
+    name: "Madoka Dual Setpoint"
+    ble_client_id: madoka_test
+    update_interval: 15s
+    dual_setpoint: true
+    outdoor_temperature:
+      name: "Madoka Outdoor Temperature"
+    clean_filter:
+      name: "Madoka Clean Filter"
+    firmware_version:
+      name: "Madoka Firmware"
+    eye_brightness:
+      name: "Madoka Eye Brightness"
+    reset_filter:
+      name: "Madoka Reset Filter"
