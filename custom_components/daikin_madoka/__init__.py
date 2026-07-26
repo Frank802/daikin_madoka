@@ -7,7 +7,7 @@ from pymadoka import Controller
 import homeassistant.helpers.config_validation as cv
 from homeassistant.const import CONF_DEVICES, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from .const import (
@@ -137,28 +137,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
         try:
             await coordinator.async_config_entry_first_refresh()
         except ConfigEntryNotReady as connection_error:
-            if single_device and async_pairing_state(hass, mac).suspended:
-                # A concluded pairing refusal never heals by retrying, so a
-                # not-ready loop would poll into the void forever — and a
-                # never-ready entry has no entities, hiding the reconnect
-                # button that opens the pairing window: the only remedy.
-                # Load degraded instead: entities unavailable, the
-                # pairing_required repair on screen, the button reachable.
-                _LOGGER.warning(
-                    "Setting up %s without a connection; it needs pairing: %s",
-                    mac,
-                    connection_error,
-                )
-            else:
-                await _safe_stop(controller)
-                if single_device:
-                    raise
-                # Legacy multi-device entries keep the reachable thermostats
-                # working instead of failing the whole entry.
-                _LOGGER.warning(
-                    "Skipping unreachable device %s: %s", mac, connection_error
-                )
-                continue
+            # NEVER setup_retry a device that is already configured. The config
+            # flow performs a full authenticated connect before creating the
+            # entry, so a failure here is a RUNTIME failure — which Home
+            # Assistant's own guidance says must surface as unavailable
+            # entities, not as a refused setup.
+            #
+            # Refusing setup instead produced the catch-22 this integration
+            # spent two field incidents in: no entities at all, hence no
+            # Reconnect button — the very button the pairing notification tells
+            # the user to press — and a fresh coordinator on every retry, each
+            # performing exactly one poll, so no failure streak, no verdict and
+            # no repair could ever accumulate. Loading degraded keeps the
+            # coordinator alive: its update_interval drives the retries, the
+            # P0.3 timeout backoff can slow them down, and every recovery
+            # affordance stays on screen.
+            _LOGGER.warning(
+                "Setting up %s without a connection; its entities stay "
+                "unavailable until it answers: %s",
+                mac,
+                connection_error,
+            )
 
         try:
             await controller.read_info()
@@ -168,7 +167,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
         coordinators[mac] = coordinator
 
     if not coordinators:
-        raise ConfigEntryNotReady("No Madoka device is reachable")
+        # Unreachable devices no longer land here (they load degraded); only a
+        # malformed entry that names no MAC at all can.
+        raise ConfigEntryError("This entry does not name any thermostat")
 
     entry.runtime_data = coordinators
 
