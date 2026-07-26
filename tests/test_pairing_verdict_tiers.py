@@ -41,6 +41,7 @@ from custom_components.daikin_madoka.const import (
     TIMEOUT_BACKOFF_INTERVAL_S,
 )
 from custom_components.daikin_madoka.coordinator import (
+    BACKOFF_PAIRING,
     MadokaCoordinator,
     async_pairing_state,
 )
@@ -214,6 +215,55 @@ async def test_timeout_streak_lengthens_the_poll_interval(
         await coordinator.async_refresh()
 
     assert coordinator.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+
+
+async def test_the_verdict_spends_the_timeout_streak(hass: HomeAssistant) -> None:
+    """Mirror the library: raising the streak verdict consumes the streak.
+
+    pymadoka 0.3.10 zeroes its own round counter at the streak raise. Our copy
+    exists ONLY to re-seed a rebuilt Connection (a setup retry throws the old
+    one away mid-streak); keeping a spent streak in it would hand every
+    rebuilt Connection a counter already at the threshold, so the next single
+    all-timeout round would re-raise the verdict immediately, forever.
+
+    What must NOT change is the brake itself: the device stays in pairing_slow
+    at the 900s cadence. Only the counter is reset.
+    """
+    entry = _entry(hass)
+    controller = _controller(rounds=STREAK)
+    coordinator = _coordinator(hass, entry, controller)
+    state = async_pairing_state(hass, MAC)
+    state.timeout_rounds = STREAK  # accumulated across earlier rebuilds
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    assert state.timeout_rounds == 0
+    assert state.backoff is True
+    assert coordinator.backoff_reason == BACKOFF_PAIRING
+    assert coordinator.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+    assert coordinator.pairing_slow_issue_active is True
+
+
+async def test_a_rebuild_after_a_verdict_starts_the_streak_from_zero(
+    hass: HomeAssistant,
+) -> None:
+    """The seed is the whole reason the counter is persisted at all."""
+    entry = _entry(hass)
+    coordinator = _coordinator(hass, entry, _controller(rounds=STREAK))
+    async_pairing_state(hass, MAC).timeout_rounds = STREAK
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    second = _coordinator(hass, entry, _controller(rounds=STREAK))
+
+    second.controller.connection.resume_pairing_timeout_rounds.assert_called_once_with(0)
+    # The brake is separate state and survives the rebuild untouched.
+    assert second.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+    assert second.backoff_reason == BACKOFF_PAIRING
 
 
 async def test_backoff_still_probes_the_device(hass: HomeAssistant) -> None:

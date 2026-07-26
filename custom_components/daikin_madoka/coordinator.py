@@ -164,6 +164,9 @@ class MadokaPairingState:
     # is unreachable without it: CONNECT_TIMEOUT cuts a setup attempt after
     # ~2 rounds, and the rebuilt Connection would restart the count at zero
     # (field incident 2026-07-21: an endless prompt salvo every 600s).
+    # Reset whenever a verdict is concluded, mirroring the library, which
+    # zeroes its own counter at both raise sites: a spent streak must not be
+    # re-injected into the next Connection.
     timeout_rounds: int = 0
     # True once a pairing refusal has been PROVEN (a path explicitly rejected
     # the bond). Automatic reconnects then stop touching the device entirely —
@@ -1079,7 +1082,9 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             self._timed_out_rounds(err),
             TIMEOUT_BACKOFF_INTERVAL_S,
         )
-        self._note_timeout_rounds()
+        # Deliberately NOT _note_timeout_rounds(): the streak has just been
+        # SPENT (see _async_enter_timeout_backoff), and reading the counter
+        # here would only copy a value the library has already zeroed.
         self._async_enter_timeout_backoff(err)
 
     @callback
@@ -1139,6 +1144,21 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         repair that suggests re-pairing without asserting a refusal.
         """
         self._pairing.last_error = err
+        # The streak has been spent, exactly as upstream spends it: pymadoka
+        # >= 0.3.10 zeroes its own round counter at this raise site. Our copy
+        # exists only to RE-SEED a Connection that a setup retry rebuilt
+        # mid-streak; carrying a spent streak into it would arm every rebuilt
+        # Connection at the threshold, so a single all-timeout round would
+        # re-raise the verdict immediately, for as long as the device stays
+        # unreachable.
+        #
+        # This cannot weaken the brake. The brake is separate state — backoff,
+        # backoff_reason and the pairing_slow repair, all set just below,
+        # persisted with the rest of the verdict, re-armed at the top of every
+        # poll and lifted only by a successful session or a deliberate user
+        # action. Zero here means "count three fresh rounds before saying this
+        # again", not "forget that pairing is not completing".
+        self._pairing.timeout_rounds = 0
         self._raise_pairing_slow_issue(err)
         self._async_slow_to_backoff_cadence(BACKOFF_PAIRING)
 
