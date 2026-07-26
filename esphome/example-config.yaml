@@ -79,6 +79,11 @@ climate:
     name: "Madoka Salon"
     ble_client_id: madoka_salon
     update_interval: 15s  # Fréquence de mise à jour (en secondes)
+    # Une seule consigne par défaut (configuration BRC1H standard).
+    # Passez à true UNIQUEMENT si le mode plage chaud/froid est activé sur le
+    # thermostat : les traits ESPHome sont figés à la compilation, ils ne
+    # peuvent pas suivre le réglage du thermostat comme le fait l'intégration HA.
+    # dual_setpoint: true
     outdoor_temperature:
       name: "Madoka Salon Temp. Exterieure"
     clean_filter:

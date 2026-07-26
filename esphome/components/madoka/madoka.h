@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <vector>
 #include <queue>
 #include <map>
@@ -68,6 +69,15 @@ static const espbt::ESPBTUUID WWR_CHARACTERISTIC_UUID =
 class Madoka : public climate::Climate, public esphome::ble_client::BLEClientNode, public PollingComponent {
  protected:
   bool should_update_ = false;
+  // Whether the entity advertises two setpoints (BRC1H "range" mode) or a
+  // single one. ESPHome traits are static per API connection, so this is a
+  // YAML option rather than something derived from the device at runtime.
+  bool dual_setpoint_ = false;
+  // Last setpoints read from the device (argument 0x20 = cooling,
+  // 0x21 = heating), kept apart from the climate state fields so the
+  // published state can be built to match the advertised traits.
+  float cooling_setpoint_ = NAN;
+  float heating_setpoint_ = NAN;
   std::queue<std::vector<uint8_t>> received_chunks_ = {};
   std::map<uint8_t, std::vector<uint8_t>> pending_chunks_ = {};
   uint16_t notify_handle_;
@@ -85,6 +95,7 @@ class Madoka : public climate::Climate, public esphome::ble_client::BLEClientNod
   void query_(uint16_t cmd, std::vector<uint8_t> args, int t_d);
   void parse_cb_(std::vector<uint8_t> msg);
   void process_incoming_chunk_(std::vector<uint8_t> chk);
+  void apply_setpoints_();
 
   void control(const climate::ClimateCall &call) override;
 
@@ -103,6 +114,7 @@ class Madoka : public climate::Climate, public esphome::ble_client::BLEClientNod
   void set_firmware_version_text_sensor(text_sensor::TextSensor *sensor) {
     this->firmware_version_text_sensor_ = sensor;
   }
+  void set_dual_setpoint(bool dual_setpoint) { this->dual_setpoint_ = dual_setpoint; }
   void set_eye_brightness_number(number::Number *number) { this->eye_brightness_number_ = number; }
   void set_reset_filter_button(button::Button *button) { this->reset_filter_button_ = button; }
   void set_eye_brightness(uint8_t level);
@@ -127,8 +139,14 @@ class Madoka : public climate::Climate, public esphome::ble_client::BLEClientNod
     traits.set_visual_min_temperature(16);
     traits.set_visual_max_temperature(32);
     traits.set_visual_temperature_step(1);
-    traits.add_feature_flags(climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE |
-                             climate::CLIMATE_REQUIRES_TWO_POINT_TARGET_TEMPERATURE);
+    uint32_t flags = climate::CLIMATE_SUPPORTS_CURRENT_TEMPERATURE;
+    // Only advertise the dual setpoint when the YAML asked for it: the BRC1H
+    // ships with range mode off, and a hardcoded two-point trait made the
+    // entity contradict the thermostat (see the "dual_setpoint" option).
+    if (this->dual_setpoint_) {
+      flags |= climate::CLIMATE_REQUIRES_TWO_POINT_TARGET_TEMPERATURE;
+    }
+    traits.add_feature_flags(flags);
     return traits;
   }
 };

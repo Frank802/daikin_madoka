@@ -99,6 +99,7 @@ async def test_sensor_setup_creates_all_sensors(hass: HomeAssistant) -> None:
         f"{MAC}_rssi",
         f"{MAC}_operating_time",
         f"{MAC}_connection_source",
+        f"{MAC}_connection_status",
     }
 
 

@@ -14,8 +14,10 @@ from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.daikin_madoka.config_flow import FlowHandler
 from custom_components.daikin_madoka.const import (
+    CONF_BONDED_SOURCES,
     CONF_FRIENDLY_NAME,
     CONF_MAC,
+    CONF_PAIRING_STATE,
     CONF_PREFERRED_SOURCE,
     DOMAIN,
 )
@@ -255,6 +257,79 @@ async def test_reconfigure_rename_only_skips_validation(
     assert entry.title == "Buanderie"
 
 
+async def test_reconfigure_rename_preserves_the_connection_state(
+    hass: HomeAssistant,
+    enable_bluetooth: None,
+) -> None:
+    """A rename must not cost the device its proxies.
+
+    async_update_entry(data=...) REPLACES entry.data, and the reconfigure step
+    rebuilt it from scratch: a four-proxy thermostat was silently reduced to
+    its single preferred proxy (and lost its persisted pairing verdict) every
+    time someone corrected a typo in its name. Same device, same bonds.
+    """
+    entry = _add_configured_entry(hass)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_BONDED_SOURCES: [PROXY_SOURCE, OTHER_SOURCE],
+            CONF_PAIRING_STATE: {MAC: {"fail_count": 2}},
+        },
+    )
+    result = await entry.start_reconfigure_flow(hass)
+
+    with (
+        patch(SETUP_ENTRY, return_value=True),
+        patch(VALIDATE) as mock_validate,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_MAC: MAC, CONF_FRIENDLY_NAME: "Buanderie"}
+        )
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    mock_validate.assert_not_called()
+    assert entry.data[CONF_BONDED_SOURCES] == [PROXY_SOURCE, OTHER_SOURCE]
+    assert entry.data[CONF_PREFERRED_SOURCE] == PROXY_SOURCE
+    assert entry.data[CONF_PAIRING_STATE] == {MAC: {"fail_count": 2}}
+
+
+async def test_reconfigure_mac_change_drops_the_old_devices_bonds(
+    hass: HomeAssistant,
+    enable_bluetooth: None,
+) -> None:
+    """A different thermostat has different bonds; carrying them over is wrong.
+
+    The validation connect that just succeeded is the new device's first (and
+    only) proven path.
+    """
+    entry = _add_configured_entry(hass)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_BONDED_SOURCES: [PROXY_SOURCE],
+            CONF_PAIRING_STATE: {MAC: {"suspended": True}},
+        },
+    )
+    result = await entry.start_reconfigure_flow(hass)
+
+    with (
+        patch(SETUP_ENTRY, return_value=True),
+        patch(VALIDATE, return_value=(None, OTHER_SOURCE)),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_MAC: OTHER_MAC, CONF_FRIENDLY_NAME: "Salon"},
+        )
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_BONDED_SOURCES] == [OTHER_SOURCE]
+    assert CONF_PAIRING_STATE not in entry.data
+
+
 async def test_reconfigure_mac_change_validates_and_resets_source(
     hass: HomeAssistant,
     enable_bluetooth: None,
@@ -427,3 +502,33 @@ async def test_validator_returns_connected_source_on_success() -> None:
 
     assert await _validate_with(controller) == (None, PROXY_SOURCE)
     assert controller.stop.await_count == 1
+
+
+# --- The pairing budget the validator runs on (P1.3) ----------------------
+# Every config flow is attended by definition: the user is being asked to
+# stand at the thermostat. It used to run on pymadoka's 8s pair_timeout
+# default under a 30s ceiling, which is the SMALLEST pairing budget in the
+# integration - at the one moment a human is guaranteed to be present.
+
+
+async def test_validator_pairs_with_the_human_budget() -> None:
+    """The flow connects under the USER_INITIATED profile."""
+    from pymadoka import ConnectionStatus
+
+    from custom_components.daikin_madoka.const import (
+        PAIRING_WINDOW_TIMEOUT,
+        VALIDATE_TIMEOUT,
+    )
+
+    controller = _stub_controller(ConnectionStatus.CONNECTED, source=PROXY_SOURCE)
+    handler = FlowHandler()
+    handler.hass = None
+
+    with patch("pymadoka.Controller", return_value=controller) as controller_cls:
+        await handler._async_validate_device(MAC)
+
+    assert controller_cls.call_args.kwargs["pair_timeout"] == PAIRING_WINDOW_TIMEOUT
+    # The invariant: the inner pairing budget must stay STRICTLY below the
+    # outer connect budget, or pymadoka's own timeout never fires, no pairing
+    # round is ever classified, and no verdict can form (see const.py).
+    assert PAIRING_WINDOW_TIMEOUT < VALIDATE_TIMEOUT

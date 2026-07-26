@@ -6,7 +6,8 @@
       "already_in_progress": "Ya hay un flujo de configuración en curso",
       "weak_signal": "Señal demasiado débil — el dispositivo probablemente está fuera de tu casa.",
       "reconfigure_successful": "Reconfiguración completada",
-      "reconfigure_legacy": "Esta entrada heredada cubre varios termostatos y no se puede reconfigurar. Elimínala y añade cada termostato individualmente."
+      "reconfigure_legacy": "Esta entrada heredada cubre varios termostatos y no se puede reconfigurar. Elimínala y añade cada termostato individualmente.",
+      "reauth_successful": "Reemparejamiento completado"
     },
     "error": {
       "not_a_mac": "Formato de dirección MAC incorrecto (p. ej. AA:BB:CC:DD:EE:FF)",
@@ -28,6 +29,10 @@
         "data": {
           "friendly_name": "Nombre descriptivo (opcional, p. ej. 'Salón')"
         }
+      },
+      "reauth_confirm": {
+        "title": "Volver a emparejar {name}",
+        "description": "{name} ha rechazado el vínculo Bluetooth, por lo que Home Assistant ya no puede comunicarse con él. Volver a emparejar requiere que estés delante del termostato.\n\nColócate delante de {name}, pulsa Enviar y acepta la solicitud de emparejamiento que aparece en su pantalla (compara el código de 6 dígitos). Dispones de aproximadamente un minuto. Un emparejamiento pertenece a un solo proxy Bluetooth: puede que haya que repetirlo más adelante para otro proxy."
       },
       "reconfigure": {
         "title": "Reconfigurar Daikin Madoka",
@@ -70,6 +75,16 @@
       },
       "connection_source": {
         "name": "Fuente de conexión"
+      },
+      "connection_status": {
+        "name": "Estado de la conexión",
+        "state": {
+          "connected": "Conectado",
+          "retrying": "Reintentando",
+          "pairing_slow": "El emparejamiento no se completa",
+          "needs_pairing": "Requiere emparejamiento",
+          "not_advertising": "Ningún proxy lo detecta"
+        }
       }
     },
     "binary_sensor": {
@@ -99,6 +114,10 @@
     "pairing_required": {
       "title": "{device} rechaza la conexión Bluetooth",
       "description": "Todas las rutas Bluetooth hacia {device} fueron rechazadas porque el proxy no está emparejado con él (intentado a través de: {proxies}). Los intentos de conexión automáticos quedan en pausa para no inundar el termostato con solicitudes de emparejamiento imposibles de completar. Colócate frente al termostato, pulsa el botón Reconectar del dispositivo en Home Assistant y confirma la solicitud de emparejamiento en su pantalla — necesaria una vez por proxy. Consulta la documentación de emparejamiento para más detalles."
+    },
+    "pairing_slow": {
+      "title": "{device} no completa su emparejamiento Bluetooth",
+      "description": "Las conexiones con {device} caducan una y otra vez mientras se establece el emparejamiento Bluetooth (intentado a través de: {proxies}). Esto no demuestra que el termostato haya rechazado nada — un proxy saturado provoca lo mismo —, así que Home Assistant sigue intentándolo, pero mucho menos a menudo, para no inundar el termostato con solicitudes de emparejamiento. Si no se recupera por sí solo: colócate frente al termostato, pulsa el botón Reconectar del dispositivo en Home Assistant y confirma la solicitud de emparejamiento en su pantalla. Consulta la documentación de emparejamiento para más detalles."
     }
   }
 }

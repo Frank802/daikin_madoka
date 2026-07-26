@@ -21,6 +21,7 @@ CODEOWNERS = ["@Petapton"]
 DEPENDENCIES = ["ble_client"]
 AUTO_LOAD = ["binary_sensor", "button", "number", "sensor", "text_sensor"]
 
+CONF_DUAL_SETPOINT = "dual_setpoint"
 CONF_OUTDOOR_TEMPERATURE = "outdoor_temperature"
 CONF_CLEAN_FILTER = "clean_filter"
 CONF_FIRMWARE_VERSION = "firmware_version"
@@ -44,6 +45,11 @@ CONFIG_SCHEMA = (
     .extend(cv.polling_component_schema("10s"))
     .extend(
         {
+            # ESPHome advertises climate traits once, when the entity is
+            # listed, so the dual setpoint cannot follow the thermostat's
+            # range mode at runtime the way the HA integration does. It is a
+            # build-time choice; default off, matching a stock BRC1H.
+            cv.Optional(CONF_DUAL_SETPOINT, default=False): cv.boolean,
             cv.Optional(CONF_OUTDOOR_TEMPERATURE): sensor.sensor_schema(
                 unit_of_measurement=UNIT_CELSIUS,
                 accuracy_decimals=0,
@@ -75,6 +81,8 @@ async def to_code(config):
     await cg.register_component(var, config)
     await climate.register_climate(var, config)
     await ble_client.register_ble_node(var, config)
+
+    cg.add(var.set_dual_setpoint(config[CONF_DUAL_SETPOINT]))
 
     if conf := config.get(CONF_OUTDOOR_TEMPERATURE):
         outdoor_sensor = await sensor.new_sensor(conf)

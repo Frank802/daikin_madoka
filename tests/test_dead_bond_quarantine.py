@@ -303,10 +303,17 @@ async def test_suspended_device_sets_up_in_degraded_mode(
     assert MAC in entry.runtime_data
 
 
-async def test_ordinary_failure_still_defers_setup(
+async def test_ordinary_failure_also_loads_degraded(
     hass: HomeAssistant, mock_bluetooth
 ) -> None:
-    """Only a concluded pairing refusal justifies loading a dead entry."""
+    """Superseded rule (was: "only a concluded refusal justifies loading").
+
+    Restricting the degraded load to `suspended` devices was itself the trap:
+    the BRC1H's dead-bond signature is a silent timeout, which P0.3 correctly
+    refuses to convict on, so the devices that most need the Reconnect button
+    were exactly the ones that never got it. Every configured thermostat now
+    loads — see tests/test_degraded_load.py for the full rule.
+    """
     entry = _entry(hass)
 
     controller = _disconnected_controller()
@@ -314,7 +321,8 @@ async def test_ordinary_failure_still_defers_setup(
     controller.start = AsyncMock(side_effect=ConnectionException("device off"))
     p1, p2, p3, present, scanner = _setup_patches(controller)
     with p1, p2, p3, present, scanner:
-        assert not await hass.config_entries.async_setup(entry.entry_id)
+        assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert entry.state is config_entries.ConfigEntryState.SETUP_RETRY
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    assert entry.runtime_data[MAC].last_update_success is False

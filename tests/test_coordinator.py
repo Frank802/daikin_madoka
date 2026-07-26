@@ -34,6 +34,11 @@ def _mock_controller(source: str | None = SOURCE) -> MagicMock:
     controller.connection.name = "Daikin"
     controller.connection.connection_status = ConnectionStatus.CONNECTED
     controller.connection.connected_source = source
+    # 0 pairing rounds at raise time is what the library leaves behind after a
+    # proven auth REJECTION (a timeout streak leaves >= PAIRING_TIMEOUT_ROUNDS),
+    # so these stubs model a refusal, not congestion. See
+    # test_pairing_verdict_tiers.py.
+    controller.connection.pairing_timeout_rounds = 0
     controller.update = AsyncMock()
     controller.refresh_status.return_value = {"set_point": {"cooling_set_point": 25}}
     return controller
@@ -194,6 +199,31 @@ async def test_successful_poll_clears_issues(hass: HomeAssistant) -> None:
     assert coordinator.last_update_success
     assert registry.async_get_issue(DOMAIN, f"pairing_required_{MAC}") is None
     assert registry.async_get_issue(DOMAIN, f"unreachable_{MAC}") is None
+
+
+async def test_empty_exception_message_falls_back_to_the_type_name(
+    hass: HomeAssistant,
+) -> None:
+    """str(TimeoutError()) is "", which produced "Could not reconnect to X: "."""
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_MAC: MAC})
+    entry.add_to_hass(hass)
+    controller = _mock_controller()
+    controller.connection.connection_status = ConnectionStatus.DISCONNECTED
+    controller.start = AsyncMock(side_effect=TimeoutError())
+    coordinator = _coordinator(hass, entry, controller)
+
+    with (
+        patch(f"{BLUETOOTH}.async_address_present", return_value=True),
+        patch(
+            f"{BLUETOOTH}.async_scanner_by_source",
+            return_value=SimpleNamespace(name="Proxy Salon"),
+        ),
+    ):
+        await coordinator.async_refresh()
+
+    message = str(coordinator.last_exception)
+    assert message == f"Could not reconnect to {MAC}: TimeoutError"
+    assert not message.endswith(": ")
 
 
 async def test_stale_grace_masks_transient_failures(hass: HomeAssistant) -> None:

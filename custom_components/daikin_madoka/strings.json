@@ -6,7 +6,8 @@
       "already_in_progress": "Configuration flow is already in progress",
       "weak_signal": "Signal too weak — the device is probably outside your home.",
       "reconfigure_successful": "Reconfiguration successful",
-      "reconfigure_legacy": "This legacy entry covers several thermostats and cannot be reconfigured. Remove it and add each thermostat individually."
+      "reconfigure_legacy": "This legacy entry covers several thermostats and cannot be reconfigured. Remove it and add each thermostat individually.",
+      "reauth_successful": "Re-pairing successful"
     },
     "error": {
       "not_a_mac": "Wrong MAC address format (e.g. AA:BB:CC:DD:EE:FF)",
@@ -28,6 +29,10 @@
         "data": {
           "friendly_name": "Friendly name (optional, e.g. 'Living room')"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-pair {name}",
+        "description": "{name} refused the Bluetooth bond, so Home Assistant cannot talk to it any more. Re-pairing needs you at the thermostat.\n\nStand in front of {name}, press Submit, then accept the pairing prompt that appears on its screen (compare the 6-digit code). You have about a minute. A bond belongs to one Bluetooth proxy, so this may need repeating for another proxy later."
       },
       "reconfigure": {
         "title": "Reconfigure Daikin Madoka",
@@ -70,6 +75,16 @@
       },
       "connection_source": {
         "name": "Connection source"
+      },
+      "connection_status": {
+        "name": "Connection status",
+        "state": {
+          "connected": "Connected",
+          "retrying": "Retrying",
+          "pairing_slow": "Pairing not completing",
+          "needs_pairing": "Needs pairing",
+          "not_advertising": "Not seen by any proxy"
+        }
       }
     },
     "binary_sensor": {
@@ -99,6 +114,10 @@
     "pairing_required": {
       "title": "{device} refuses the Bluetooth connection",
       "description": "Every Bluetooth path to {device} was refused because the proxy is not paired with it (tried via: {proxies}). Automatic connection attempts are now paused so the thermostat is not flooded with pairing prompts it cannot complete. Stand at the thermostat, press the device's Reconnect button in Home Assistant, and confirm the pairing prompt on its screen — required once per proxy. See the pairing documentation for details."
+    },
+    "pairing_slow": {
+      "title": "{device} is not completing its Bluetooth pairing",
+      "description": "Connections to {device} keep timing out while the Bluetooth pairing is being established (tried via: {proxies}). This is not proof that the thermostat refused anything — a busy proxy can cause it too — so Home Assistant keeps trying, but far less often to avoid flooding the thermostat with pairing prompts. If it does not recover on its own: stand at the thermostat, press the device's Reconnect button in Home Assistant, and confirm the pairing prompt on its screen. See the pairing documentation for details."
     }
   }
 }

@@ -15,12 +15,27 @@ HASS = object()
 PATCH_TARGET = "homeassistant.components.bluetooth.async_scanner_devices_by_address"
 
 
-def _scanner_device(source: str | None, rssi: int | None) -> SimpleNamespace:
-    """Fake BluetoothScannerDevice exposing just what sort_key reads."""
-    return SimpleNamespace(
+def _scanner_device(
+    source: str | None, rssi: int | None, free_slots: int | None = None
+) -> SimpleNamespace:
+    """Fake BluetoothScannerDevice exposing just what sort_key reads.
+
+    free_slots=None models every backend that does not report allocations at
+    all (local adapters, older habluetooth); the scanner attribute is then
+    absent entirely, which is also what the pre-slot-awareness fixtures look
+    like.
+    """
+    device = SimpleNamespace(
         ble_device=SimpleNamespace(details={"source": source}),
         advertisement=SimpleNamespace(rssi=rssi) if rssi is not None else None,
     )
+    if free_slots is not None:
+        device.scanner = SimpleNamespace(
+            get_allocations=lambda: SimpleNamespace(
+                source=source, slots=3, free=free_slots, allocated=[]
+            )
+        )
+    return device
 
 
 def test_preferred_source_beats_stronger_rssi() -> None:
@@ -106,3 +121,96 @@ def test_none_rssi_in_advertisement_sorted_last() -> None:
         result = build_candidates(HASS, ADDRESS, None)
 
     assert result == [strong.ble_device, ghost.ble_device]
+
+
+# --------------------------------------------------------------------------
+# Slot awareness
+#
+# An ESPHome proxy serves a fixed number of simultaneous connections and
+# refuses every connect once they are taken; HA core issue #176516 can also
+# leave slots allocated to connections that no longer exist. In the field one
+# proxy saturated at 3/3 kept being offered first to a thermostat while three
+# idle proxies were never tried, so every attempt failed instantly, forever.
+# --------------------------------------------------------------------------
+
+
+def test_a_saturated_preferred_proxy_is_demoted() -> None:
+    """The field case: sticky ordering must not outrank "can accept at all"."""
+    saturated_preferred = _scanner_device(PROXY_A, -50, free_slots=0)
+    free_other = _scanner_device(PROXY_B, -80, free_slots=2)
+
+    with patch(PATCH_TARGET, return_value=[saturated_preferred, free_other]):
+        result = build_candidates(HASS, ADDRESS, PROXY_A)
+
+    assert result == [free_other.ble_device, saturated_preferred.ble_device]
+
+
+def test_a_saturated_proxy_is_demoted_not_excluded() -> None:
+    """A slot may free up before we get there; never throw a path away."""
+    saturated = _scanner_device(PROXY_A, -40, free_slots=0)
+
+    with patch(PATCH_TARGET, return_value=[saturated]):
+        result = build_candidates(HASS, ADDRESS, None)
+
+    assert result == [saturated.ble_device]
+
+
+def test_free_slots_beat_a_much_stronger_signal() -> None:
+    saturated_close = _scanner_device(PROXY_A, -35, free_slots=0)
+    free_far = _scanner_device(PROXY_B, -92, free_slots=1)
+
+    with patch(PATCH_TARGET, return_value=[saturated_close, free_far]):
+        result = build_candidates(HASS, ADDRESS, None)
+
+    assert result == [free_far.ble_device, saturated_close.ble_device]
+
+
+def test_preferred_still_wins_when_both_have_slots() -> None:
+    """Slot awareness must not undo the sticky-proxy ordering it extends."""
+    free_other = _scanner_device(PROXY_B, -40, free_slots=3)
+    free_preferred = _scanner_device(PROXY_A, -90, free_slots=1)
+
+    with patch(PATCH_TARGET, return_value=[free_other, free_preferred]):
+        result = build_candidates(HASS, ADDRESS, PROXY_A)
+
+    assert result == [free_preferred.ble_device, free_other.ble_device]
+
+
+def test_a_scanner_without_allocation_info_is_assumed_free() -> None:
+    """Unknown must mean usable, or a whole backend would be demoted for free."""
+    unknown = _scanner_device(PROXY_A, -80)
+    free = _scanner_device(PROXY_B, -85, free_slots=2)
+
+    with patch(PATCH_TARGET, return_value=[free, unknown]):
+        result = build_candidates(HASS, ADDRESS, None)
+
+    # Same slot rank, so plain RSSI order decides.
+    assert result == [unknown.ble_device, free.ble_device]
+
+
+def test_a_scanner_returning_none_allocations_is_assumed_free() -> None:
+    """BaseHaScanner.get_allocations() returns None unless a subclass tracks it."""
+    silent = _scanner_device(PROXY_A, -80)
+    silent.scanner = SimpleNamespace(get_allocations=lambda: None)
+    saturated = _scanner_device(PROXY_B, -30, free_slots=0)
+
+    with patch(PATCH_TARGET, return_value=[saturated, silent]):
+        result = build_candidates(HASS, ADDRESS, None)
+
+    assert result == [silent.ble_device, saturated.ble_device]
+
+
+def test_a_raising_allocation_read_is_assumed_free() -> None:
+    """A diagnostics read must never be able to break connecting."""
+
+    def _boom():
+        raise RuntimeError("scanner went away")
+
+    grumpy = _scanner_device(PROXY_A, -80)
+    grumpy.scanner = SimpleNamespace(get_allocations=_boom)
+    saturated = _scanner_device(PROXY_B, -30, free_slots=0)
+
+    with patch(PATCH_TARGET, return_value=[saturated, grumpy]):
+        result = build_candidates(HASS, ADDRESS, None)
+
+    assert result == [grumpy.ble_device, saturated.ble_device]
