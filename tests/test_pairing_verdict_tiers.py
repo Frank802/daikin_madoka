@@ -3,9 +3,12 @@
 pymadoka raises PairingRequiredError both when a path explicitly REJECTED the
 authenticated bond (proof that a human must re-pair) and when every path
 merely TIMED OUT for three rounds (an inference, which congestion alone can
-produce). The two raises share one constructor, so message and attributes are
-byte-identical; the only side channel is the public round counter, reset to 0
-by the rejection raise and left at >= PAIRING_TIMEOUT_ROUNDS by the streak.
+produce). The pinned library (0.3.10) says which on the error itself, in
+`reason`; before that the two raises shared one constructor and were
+byte-identical, leaving only the public round counter as a side channel —
+reset to 0 by the rejection raise, left at >= PAIRING_TIMEOUT_ROUNDS by the
+streak. Both paths are exercised here: the fallback is still live code for
+anyone running an older library.
 
 Field incident 2026-07-26: convicting on both is what falsely quarantined a
 thermostat whose bond was intact (Parents) - a manual Reconnect restored it
@@ -19,6 +22,7 @@ storm. Hence three tiers:
 3. anything else -> unchanged retry cadence.
 """
 
+import contextlib
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -37,6 +41,7 @@ from custom_components.daikin_madoka.const import (
     TIMEOUT_BACKOFF_INTERVAL_S,
 )
 from custom_components.daikin_madoka.coordinator import (
+    BACKOFF_PAIRING,
     MadokaCoordinator,
     async_pairing_state,
 )
@@ -49,16 +54,25 @@ BLUETOOTH = "homeassistant.components.bluetooth"
 
 
 def _error(reason: str | None = None, sources: list[str | None] | None = None):
-    """A PairingRequiredError as pymadoka 0.3.9 or 0.3.10 would raise it.
+    """A PairingRequiredError as the pinned pymadoka (0.3.10) raises it.
 
-    The pinned library is still 0.3.9, whose constructor knows nothing about
-    `reason`, so 0.3.10 is modelled by setting the attribute on the instance —
-    which is exactly what the coordinator reads.
+    reason=None models a PRE-0.3.10 library, which had no verdict at all: the
+    attribute is deleted, because 0.3.10's constructor always sets one and
+    DEFAULTS IT TO "rejected" (so that pre-0.3.10 call sites keep meaning what
+    they meant). That default is why every "streak" here now has to say so
+    explicitly — a bare PairingRequiredError is a refusal.
     """
-    err = PairingRequiredError(MAC, sources if sources is not None else [SOURCE])
-    if reason is not None:
-        err.reason = reason
-    return err
+    if reason is None:
+        err = PairingRequiredError(MAC, sources if sources is not None else [SOURCE])
+        with contextlib.suppress(AttributeError):
+            del err.reason
+        return err
+    return PairingRequiredError(
+        MAC,
+        sources if sources is not None else [SOURCE],
+        reason=reason,
+        timeout_rounds=STREAK if reason == "timeout_streak" else 0,
+    )
 
 
 def _controller(rounds: int | None = 0, err=None) -> MagicMock:
@@ -66,8 +80,13 @@ def _controller(rounds: int | None = 0, err=None) -> MagicMock:
 
     rounds is what the library leaves on connection.pairing_timeout_rounds at
     the moment it raises: 0 after a proven rejection, >= 3 after a streak
-    (pymadoka <= 0.3.9). None models a library that dropped the property.
-    err overrides the raised exception, to model 0.3.10's `reason`.
+    (pymadoka <= 0.3.9). None models a library that dropped the property, and
+    then no `reason` is stated either — the pre-0.3.10 world, where the
+    coordinator has nothing at all to read.
+
+    Since the 0.3.10 pin the counter is no longer the channel (the library
+    zeroes it at BOTH raise sites), so unless err says otherwise the default
+    exception carries the verdict `rounds` is shorthand for.
     """
     controller = MagicMock()
     controller.connection.address = MAC
@@ -79,7 +98,13 @@ def _controller(rounds: int | None = 0, err=None) -> MagicMock:
         del controller.connection.pairing_timeout_rounds
     else:
         controller.connection.pairing_timeout_rounds = rounds
-    controller.start = AsyncMock(side_effect=err or _error())
+    if err is None:
+        err = (
+            _error()
+            if rounds is None
+            else _error("rejected" if rounds == 0 else "timeout_streak")
+        )
+    controller.start = AsyncMock(side_effect=err)
     controller.update = AsyncMock()
     controller.refresh_status.return_value = {"set_point": {"cooling_set_point": 25}}
     return controller
@@ -192,6 +217,55 @@ async def test_timeout_streak_lengthens_the_poll_interval(
     assert coordinator.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
 
 
+async def test_the_verdict_spends_the_timeout_streak(hass: HomeAssistant) -> None:
+    """Mirror the library: raising the streak verdict consumes the streak.
+
+    pymadoka 0.3.10 zeroes its own round counter at the streak raise. Our copy
+    exists ONLY to re-seed a rebuilt Connection (a setup retry throws the old
+    one away mid-streak); keeping a spent streak in it would hand every
+    rebuilt Connection a counter already at the threshold, so the next single
+    all-timeout round would re-raise the verdict immediately, forever.
+
+    What must NOT change is the brake itself: the device stays in pairing_slow
+    at the 900s cadence. Only the counter is reset.
+    """
+    entry = _entry(hass)
+    controller = _controller(rounds=STREAK)
+    coordinator = _coordinator(hass, entry, controller)
+    state = async_pairing_state(hass, MAC)
+    state.timeout_rounds = STREAK  # accumulated across earlier rebuilds
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    assert state.timeout_rounds == 0
+    assert state.backoff is True
+    assert coordinator.backoff_reason == BACKOFF_PAIRING
+    assert coordinator.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+    assert coordinator.pairing_slow_issue_active is True
+
+
+async def test_a_rebuild_after_a_verdict_starts_the_streak_from_zero(
+    hass: HomeAssistant,
+) -> None:
+    """The seed is the whole reason the counter is persisted at all."""
+    entry = _entry(hass)
+    coordinator = _coordinator(hass, entry, _controller(rounds=STREAK))
+    async_pairing_state(hass, MAC).timeout_rounds = STREAK
+
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        await coordinator.async_refresh()
+
+    second = _coordinator(hass, entry, _controller(rounds=STREAK))
+
+    second.controller.connection.resume_pairing_timeout_rounds.assert_called_once_with(0)
+    # The brake is separate state and survives the rebuild untouched.
+    assert second.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+    assert second.backoff_reason == BACKOFF_PAIRING
+
+
 async def test_backoff_still_probes_the_device(hass: HomeAssistant) -> None:
     """Unlike a quarantine, the next poll is allowed to try again."""
     entry = _entry(hass)
@@ -255,7 +329,12 @@ async def test_backoff_suppresses_the_unreachable_repair(
 async def test_a_missing_round_counter_takes_the_safe_branch(
     hass: HomeAssistant,
 ) -> None:
-    """Without evidence we never accuse: back off, do not quarantine."""
+    """Without evidence we never accuse: back off, do not quarantine.
+
+    Neither a reason nor a counter — a library older than 0.3.10 that also
+    dropped the property. The coordinator has nothing to read and must still
+    take the safe branch.
+    """
     entry = _entry(hass)
     controller = _controller(rounds=None)
     coordinator = _coordinator(hass, entry, controller)
@@ -340,7 +419,7 @@ async def test_an_unknown_reason_takes_the_safe_branch(hass: HomeAssistant) -> N
 async def test_legacy_library_still_uses_the_side_channel(
     hass: HomeAssistant,
 ) -> None:
-    """0.3.9 is the pinned version: its rejections must still be recognised."""
+    """A pre-0.3.10 library states no reason: its rejections must still land."""
     entry = _entry(hass)
     controller = _controller(rounds=0, err=_error())  # no reason attribute
     coordinator = _coordinator(hass, entry, controller)

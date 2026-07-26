@@ -164,6 +164,9 @@ class MadokaPairingState:
     # is unreachable without it: CONNECT_TIMEOUT cuts a setup attempt after
     # ~2 rounds, and the rebuilt Connection would restart the count at zero
     # (field incident 2026-07-21: an endless prompt salvo every 600s).
+    # Reset whenever a verdict is concluded, mirroring the library, which
+    # zeroes its own counter at both raise sites: a spent streak must not be
+    # re-injected into the next Connection.
     timeout_rounds: int = 0
     # True once a pairing refusal has been PROVEN (a path explicitly rejected
     # the bond). Automatic reconnects then stop touching the device entirely —
@@ -677,6 +680,12 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # no bond yet, and widen the pairing budget so a human can actually
         # compare codes and confirm.
         self._clear_pairing_suspension()
+        # And lift the retry brake, so the refresh below runs at the
+        # configured cadence and — crucially — the NEXT one does too if this
+        # attempt fails. Without it the poll triggered here re-armed the brake
+        # on its way in and a failed reconnect was followed by 900s of
+        # silence, which is what made the button look inert.
+        self.async_clear_backoff()
         self._async_persist_pairing_state()
         self._async_open_pairing_window()
         # The BRC1H stops advertising while connected and takes a moment to
@@ -1043,9 +1052,10 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         is the only thing worth reading: it is the raise site's own verdict
         rather than something reconstructed from a side effect.
 
-        Before 0.3.10 (0.3.9 is the pinned version) there was no verdict, only
-        the public round counter — reset to 0 by the rejection raise, left at
-        the threshold by the streak raise. Undocumented and fragile, and note
+        Before 0.3.10 (0.3.10 is the pin, but an older library can still be
+        installed in a container that has not been rebuilt) there was no
+        verdict, only the public round counter — reset to 0 by the rejection
+        raise, left at the threshold by the streak raise. Fragile, and note
         that 0.3.10 resets it at BOTH sites, so reading it there would invert
         the diagnosis: `reason` must be consulted FIRST, and the counter only
         when the attribute is absent.
@@ -1078,7 +1088,9 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             self._timed_out_rounds(err),
             TIMEOUT_BACKOFF_INTERVAL_S,
         )
-        self._note_timeout_rounds()
+        # Deliberately NOT _note_timeout_rounds(): the streak has just been
+        # SPENT (see _async_enter_timeout_backoff), and reading the counter
+        # here would only copy a value the library has already zeroed.
         self._async_enter_timeout_backoff(err)
 
     @callback
@@ -1138,6 +1150,21 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         repair that suggests re-pairing without asserting a refusal.
         """
         self._pairing.last_error = err
+        # The streak has been spent, exactly as upstream spends it: pymadoka
+        # >= 0.3.10 zeroes its own round counter at this raise site. Our copy
+        # exists only to RE-SEED a Connection that a setup retry rebuilt
+        # mid-streak; carrying a spent streak into it would arm every rebuilt
+        # Connection at the threshold, so a single all-timeout round would
+        # re-raise the verdict immediately, for as long as the device stays
+        # unreachable.
+        #
+        # This cannot weaken the brake. The brake is separate state — backoff,
+        # backoff_reason and the pairing_slow repair, all set just below,
+        # persisted with the rest of the verdict, re-armed at the top of every
+        # poll and lifted only by a successful session or a deliberate user
+        # action. Zero here means "count three fresh rounds before saying this
+        # again", not "forget that pairing is not completing".
+        self._pairing.timeout_rounds = 0
         self._raise_pairing_slow_issue(err)
         self._async_slow_to_backoff_cadence(BACKOFF_PAIRING)
 
@@ -1185,6 +1212,35 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             self._normal_interval = interval
             return
         self.update_interval = interval
+
+    @callback
+    def async_clear_backoff(self) -> None:
+        """Lift the retry brake because a human just intervened.
+
+        The brake is an inference about a device NOBODY HAS TOUCHED: either
+        the library's timeout verdict or a streak of failed polls. A user who
+        has just walked to the thermostat and re-paired it is better
+        information than any inference, so their action must be followed by an
+        attempt now — not up to TIMEOUT_BACKOFF_INTERVAL_S later. Field report
+        2026-07-26: a thermostat in pairing_slow was re-paired by hand and
+        nothing happened for a quarter of an hour, so from the user's point of
+        view their action did nothing at all.
+
+        fail_count goes with it, and has to: it is the brake's OTHER trigger,
+        so leaving it above the threshold would let the very attempt the user
+        asked for re-engage the brake the moment it failed, and the next one
+        would again be 900s away. The repairs themselves are left alone — they
+        are removed by _clear_issues when an attempt actually succeeds, which
+        is the only thing that proves the situation is over.
+
+        Callers must trigger the attempt themselves: this is a @callback and
+        the poll it enables is theirs to schedule.
+        """
+        if not self._pairing.backoff and not self._pairing.fail_count:
+            return
+        self._pairing.fail_count = 0
+        self._async_restore_normal_interval()
+        self._async_persist_pairing_state()
 
     @callback
     def _async_restore_normal_interval(self) -> None:

@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.8.1 - July 2026
+
+Requires **pymadoka-ng 0.3.10** (installed automatically). The library now states outright *why* pairing failed instead of leaving it to be inferred from a side effect, which is what v3.8.0 already reads when the attribute is there — this release simply makes it the version you actually run.
+
+- **Re-pairing a thermostat now does something you can see.** When the retry cadence had been slowed to 15 minutes, walking to the thermostat and re-pairing it changed nothing for up to a quarter of an hour: the brake was still running and the recovery action looked inert. Pressing **Reconnect**, or submitting the re-pairing form, now lifts the brake, connects straight away and — if that attempt still fails — leaves the thermostat on its normal poll interval instead of putting it back under the 15-minute one. The warning disappears as soon as a connection actually succeeds, as before.
+- **"Pairing not completing" no longer re-fires on the first slow round.** The integration keeps its own copy of the timed-out-round streak so it survives a rebuilt connection; it now spends that streak when the warning is raised, exactly as the library spends its own. Without that, every rebuilt connection started at the threshold and one more slow round was enough to raise the same verdict again. The 15-minute retry cadence and the warning itself are unchanged.
+
 ## v3.8.0 - July 2026
 
 **A thermostat can no longer become unrecoverable.** This release rewrites the connection, pairing and recovery layer after a full review of it. Three field incidents drove it: a thermostat with a perfectly good bond was quarantined as "refused the pairing" and locked out; two others ended up in `setup_retry`, where *every* entity vanishes — including the **Reconnect** button the integration's own notification tells you to press; and neither could be re-paired by any documented route, because the 60-second "walk to the thermostat" budget was nested inside a 30-second connect budget and was silently cancelled at ~28 s.

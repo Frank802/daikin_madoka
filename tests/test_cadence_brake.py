@@ -25,13 +25,14 @@ from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from pymadoka import ConnectionException
+from pymadoka import ConnectionException, PairingRequiredError
 from pymadoka.connection import ConnectionStatus
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 
 from custom_components.daikin_madoka import _async_update_listener
 from custom_components.daikin_madoka.const import (
@@ -272,6 +273,90 @@ async def test_a_verdictless_failure_re_arms_a_dropped_brake(
 
     assert coordinator.pairing_backoff is True
     assert coordinator.update_interval == BACKOFF
+
+
+# --------------------------------------------------------------------------
+# A deliberate user action outranks the brake
+# --------------------------------------------------------------------------
+
+
+async def test_reconnect_lifts_the_brake_and_attempts_immediately(
+    hass: HomeAssistant,
+) -> None:
+    """Field report 2026-07-26: a re-pairing that seemed to do nothing.
+
+    A thermostat was in pairing_slow with a 900s brake. The user saw the
+    repair, walked over and re-paired - and nothing happened for a quarter of
+    an hour, because the brake was still running. A brake is an inference
+    about a device nobody has touched; a human who just touched it is better
+    information than any inference, so pressing Reconnect must lift it and try
+    now.
+    """
+    entry = _entry(hass)
+    controller = _controller()
+    controller.stop = AsyncMock()
+    coordinator = _coordinator(hass, entry, controller)
+
+    await _refresh(coordinator, UNREACHABLE_THRESHOLD)
+    assert coordinator.update_interval == BACKOFF
+    attempts = controller.start.await_count
+
+    present, scanner = _patched_bluetooth()
+    with (
+        present,
+        scanner,
+        patch("custom_components.daikin_madoka.coordinator.asyncio.sleep", AsyncMock()),
+    ):
+        await coordinator.async_reconnect()
+
+    # The attempt happened during the button press, not 900s later...
+    assert controller.start.await_count == attempts + 1
+    # ...and it failed, yet the cadence is the configured one: the streak that
+    # armed the brake was evidence gathered before the user intervened.
+    assert coordinator.update_interval == NORMAL
+    assert coordinator.pairing_backoff is False
+    assert coordinator.backoff_reason is None
+
+    # async_request_refresh leaves the debouncer's cooldown timer armed.
+    await coordinator.async_shutdown()
+
+
+async def test_reconnect_lifts_a_pairing_brake_and_clears_the_repair_on_success(
+    hass: HomeAssistant,
+) -> None:
+    """The pairing_slow warning must not outlive the situation it describes."""
+    entry = _entry(hass)
+    controller = _controller()
+    controller.stop = AsyncMock()
+    controller.start = AsyncMock(
+        side_effect=PairingRequiredError(
+            MAC, [SOURCE], reason="timeout_streak", timeout_rounds=3
+        )
+    )
+    coordinator = _coordinator(hass, entry, controller)
+    await _refresh(coordinator)
+    assert coordinator.update_interval == BACKOFF
+    assert coordinator.backoff_reason == BACKOFF_PAIRING
+    assert coordinator.pairing_slow_issue_active is True
+
+    async def _start() -> None:
+        controller.connection.connection_status = ConnectionStatus.CONNECTED
+
+    controller.start = AsyncMock(side_effect=_start)
+    present, scanner = _patched_bluetooth()
+    with (
+        present,
+        scanner,
+        patch("custom_components.daikin_madoka.coordinator.asyncio.sleep", AsyncMock()),
+    ):
+        await coordinator.async_reconnect()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.update_interval == NORMAL
+    assert coordinator.pairing_slow_suspected is False
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"pairing_slow_{MAC}") is None
+
+    await coordinator.async_shutdown()
 
 
 async def test_a_rebuilt_coordinator_keeps_the_brake(hass: HomeAssistant) -> None:

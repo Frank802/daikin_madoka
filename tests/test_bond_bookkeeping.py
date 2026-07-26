@@ -235,15 +235,8 @@ def _refuse_with_evidence(
     sources: list[str | None],
     evidence: dict[str | None, str],
 ) -> None:
-    """A refusal as pymadoka >= 0.3.10 reports it: with a per-path verdict.
-
-    The pinned library is 0.3.9, whose constructor knows nothing about
-    `reason` / `evidence`, so the newer shape is modelled by setting the
-    attributes on the instance — exactly what the coordinator reads.
-    """
-    err = PairingRequiredError(MAC, sources)
-    err.reason = "rejected"
-    err.evidence = evidence
+    """A refusal as pymadoka >= 0.3.10 reports it: with a per-path verdict."""
+    err = PairingRequiredError(MAC, sources, reason="rejected", evidence=evidence)
     coordinator.controller.start = AsyncMock(side_effect=err)
 
 
@@ -356,7 +349,15 @@ async def test_a_timeout_streak_never_costs_a_bond(hass: HomeAssistant) -> None:
     """Only a rejection proves anything; a timeout is congestion until proven."""
     entry = _entry(hass, **{CONF_BONDED_SOURCES: [PROXY_A, PROXY_B]})
     controller = _controller(rounds=3)
-    controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [PROXY_A]))
+    # reason= is mandatory to model a streak since the 0.3.10 pin: the
+    # constructor defaults to "rejected" (it keeps pre-0.3.10 call sites
+    # meaning what they meant), so a bare PairingRequiredError is now a
+    # REFUSAL and the round counter no longer says otherwise.
+    controller.start = AsyncMock(
+        side_effect=PairingRequiredError(
+            MAC, [PROXY_A], reason="timeout_streak", timeout_rounds=3
+        )
+    )
     coordinator = _coordinator(hass, entry, controller)
 
     present, scanner = _patched_bluetooth()

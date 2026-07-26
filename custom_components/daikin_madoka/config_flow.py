@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 
@@ -42,6 +42,9 @@ from .const import (
 )
 from .coordinator import async_forget_pairing_state
 from .util import normalize_mac
+
+if TYPE_CHECKING:
+    from .coordinator import MadokaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,6 +127,22 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if preferred_source is not None:
             data[CONF_PREFERRED_SOURCE] = preferred_source
         return self.async_create_entry(title=title, data=data)
+
+    @callback
+    def _async_coordinator(
+        self, entry: ConfigEntry, mac: str
+    ) -> "MadokaCoordinator | None":
+        """The live coordinator for this MAC, when there is one.
+
+        runtime_data only exists while the entry is loaded, and the mapping is
+        keyed by normalized MAC. A flow must work with no coordinator at all
+        (an entry being set up, a legacy shape), so every caller treats None as
+        "nothing to nudge" rather than an error.
+        """
+        coordinators = getattr(entry, "runtime_data", None)
+        if isinstance(coordinators, dict):
+            return coordinators.get(mac)
+        return None
 
     async def _async_validate_device(self, mac: str) -> tuple[str | None, str | None]:
         """Try a full authenticated connect. Returns (error_key, connected_source).
@@ -295,6 +314,16 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            # Submitting this form means the user is standing at the
+            # thermostat. Lift the retry brake BEFORE the attempt: the
+            # evidence that armed it was gathered while nobody was touching
+            # the device, and leaving it on means that if this attempt fails
+            # the next one is up to TIMEOUT_BACKOFF_INTERVAL_S away — a
+            # recovery action that visibly does nothing for a quarter of an
+            # hour (field report 2026-07-26).
+            coordinator = self._async_coordinator(entry, mac)
+            if coordinator is not None:
+                coordinator.async_clear_backoff()
             error_key, source = await self._async_validate_device(mac)
             if error_key is None:
                 # The pairing just succeeded, so every verdict recorded against
@@ -317,6 +346,11 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             # Unlike the fire-and-forget Reconnect button, a failure here is
             # reported to the person who is standing at the thermostat.
             errors["base"] = error_key
+            if coordinator is not None:
+                # This flow's own connect has already been torn down, so hand
+                # the retry straight back to the coordinator: the user is
+                # still there, and it now runs at the configured cadence.
+                self.hass.async_create_task(coordinator.async_request_refresh())
 
         return self.async_show_form(
             step_id="reauth_confirm",
