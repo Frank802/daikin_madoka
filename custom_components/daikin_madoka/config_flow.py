@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -40,6 +41,8 @@ from .const import (
 )
 from .coordinator import async_forget_pairing_state
 from .util import normalize_mac
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -131,11 +134,23 @@ class FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         from .util import build_candidates
 
+        def _candidates():
+            # Total by contract, like the coordinator's (see __init__): a
+            # raising callback drops pymadoka onto its single-path fallback,
+            # which rescores every path on each of its three attempts and can
+            # hop to a proxy this flow never chose. Reporting no path turns that
+            # into a plain "cannot_connect" the attending user can retry.
+            try:
+                return build_candidates(self.hass, mac, None)
+            except Exception:  # see above
+                _LOGGER.exception("Could not build the candidate list for %s", mac)
+                return []
+
         controller = Controller(
             mac,
             hass=self.hass,
             reconnect=False,
-            candidates_callback=lambda: build_candidates(self.hass, mac, None),
+            candidates_callback=_candidates,
             pair_timeout=PAIRING_WINDOW_TIMEOUT,
         )
         try:

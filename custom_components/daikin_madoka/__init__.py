@@ -105,21 +105,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
         # so a single preferred_source cannot be right for all of them: they
         # get plain RSSI ordering instead.
         def _candidates(mac=mac):
-            preferred = (
-                entry.data.get(CONF_PREFERRED_SOURCE) if single_device else None
-            )
-            # Automatic reconnects only reach proxies known to hold a bond:
-            # touching an unbonded one starts a real numeric-comparison
-            # pairing that no unattended retry can complete, and repeating it
-            # jams the thermostat. A user-opened pairing window lifts the
-            # restriction, and so does having no bond on record yet (fresh
-            # install), where an unrestricted first connect is the only way in.
-            allowed = None
-            if single_device and not async_pairing_state(hass, mac).pairing_window:
-                allowed = entry.data.get(CONF_BONDED_SOURCES) or (
-                    [preferred] if preferred else None
+            # TOTAL BY CONTRACT: this callback must never raise. pymadoka
+            # catches an exception here and silently falls back to
+            # _connect_via_ha_single(), which lets habluetooth's scorer choose
+            # any path, retries it three times AND calls pair() unconditionally
+            # — the unattended auto-pairing this whole policy exists to forbid,
+            # reachable through a single stray exception. The library's fallback
+            # cannot be changed from here, so the callback is made incapable of
+            # triggering it.
+            try:
+                preferred = (
+                    entry.data.get(CONF_PREFERRED_SOURCE) if single_device else None
                 )
-            return build_candidates(hass, mac, preferred, allowed_sources=allowed)
+                # Automatic reconnects only reach proxies known to hold a bond:
+                # touching an unbonded one starts a real numeric-comparison
+                # pairing that no unattended retry can complete, and repeating it
+                # jams the thermostat. A user-opened pairing window lifts the
+                # restriction, and so does having no bond on record yet (fresh
+                # install), where an unrestricted first connect is the only way in.
+                allowed = None
+                if single_device and not async_pairing_state(hass, mac).pairing_window:
+                    allowed = entry.data.get(CONF_BONDED_SOURCES) or (
+                        [preferred] if preferred else None
+                    )
+                return build_candidates(hass, mac, preferred, allowed_sources=allowed)
+            except Exception:  # see the contract above
+                # Fail CLOSED, with an empty list. The library reports that as
+                # DeviceUnreachableError, which surfaces as an ordinary failed
+                # poll and feeds the device_unreachable repair: visible, bounded,
+                # and it touches no radio. The alternative — returning a
+                # best-effort list built from partial state — risks handing back
+                # exactly the unbonded proxies the restriction was computed to
+                # remove, which is the failure mode that jams a BRC1H. A wrong
+                # "unreachable" costs one poll interval; a wrong pairing salvo
+                # costs a trip to the thermostat.
+                _LOGGER.exception(
+                    "Could not build the candidate list for %s; reporting no "
+                    "path rather than letting the library pick one",
+                    mac,
+                )
+                return []
 
         # reconnect=False: the coordinator is the single reconnect owner; a
         # library-side background reconnect task would race it.
