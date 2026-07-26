@@ -1043,9 +1043,10 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         is the only thing worth reading: it is the raise site's own verdict
         rather than something reconstructed from a side effect.
 
-        Before 0.3.10 (0.3.9 is the pinned version) there was no verdict, only
-        the public round counter — reset to 0 by the rejection raise, left at
-        the threshold by the streak raise. Undocumented and fragile, and note
+        Before 0.3.10 (0.3.10 is the pin, but an older library can still be
+        installed in a container that has not been rebuilt) there was no
+        verdict, only the public round counter — reset to 0 by the rejection
+        raise, left at the threshold by the streak raise. Fragile, and note
         that 0.3.10 resets it at BOTH sites, so reading it there would invert
         the diagnosis: `reason` must be consulted FIRST, and the counter only
         when the attribute is absent.

@@ -191,10 +191,16 @@ async def test_pairing_timeout_streak_still_backs_off_while_loaded(
     """P0.3's backoff drives the loaded entry's cadence, not a setup retry."""
     entry = _entry(hass)
     controller = _controller()
-    # A timeout streak (round counter at the threshold) never convicts; it
-    # slows the poll down instead.
+    # A timeout streak never convicts; it slows the poll down instead. Since
+    # the 0.3.10 pin the verdict has to be stated: the constructor defaults to
+    # reason="rejected", so a bare PairingRequiredError is a refusal whatever
+    # the round counter says.
     controller.connection.pairing_timeout_rounds = 3
-    controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [SOURCE]))
+    controller.start = AsyncMock(
+        side_effect=PairingRequiredError(
+            MAC, [SOURCE], reason="timeout_streak", timeout_rounds=3
+        )
+    )
 
     assert await _setup(hass, entry, controller, platforms=["button"])
 

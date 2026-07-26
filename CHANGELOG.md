@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.8.1 - July 2026
+
+Requires **pymadoka-ng 0.3.10** (installed automatically). The library now states outright *why* pairing failed instead of leaving it to be inferred from a side effect, which is what v3.8.0 already reads when the attribute is there — this release simply makes it the version you actually run.
+
 ## v3.8.0 - July 2026
 
 **A thermostat can no longer become unrecoverable.** This release rewrites the connection, pairing and recovery layer after a full review of it. Three field incidents drove it: a thermostat with a perfectly good bond was quarantined as "refused the pairing" and locked out; two others ended up in `setup_retry`, where *every* entity vanishes — including the **Reconnect** button the integration's own notification tells you to press; and neither could be re-paired by any documented route, because the 60-second "walk to the thermostat" budget was nested inside a 30-second connect budget and was silently cancelled at ~28 s.

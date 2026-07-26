@@ -141,7 +141,13 @@ async def test_timeout_streak_does_not_start_a_reauth_flow(
     """A streak proves nothing; asking the user to walk over would be a lie."""
     entry = _entry(hass)
     controller = _controller(rounds=3)
-    controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [SOURCE]))
+    # Explicit since the 0.3.10 pin: PairingRequiredError defaults to
+    # reason="rejected", so a streak must say so or it reads as a refusal.
+    controller.start = AsyncMock(
+        side_effect=PairingRequiredError(
+            MAC, [SOURCE], reason="timeout_streak", timeout_rounds=3
+        )
+    )
     coordinator = _coordinator(hass, entry, controller)
     present, scanner = _patched_bluetooth()
 
