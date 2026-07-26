@@ -62,6 +62,17 @@ def _async_connect_lock(hass: HomeAssistant) -> asyncio.Lock:
     return hass.data.setdefault(CONNECT_LOCK_KEY, asyncio.Lock())
 
 
+class _PollSkipped(Exception):
+    """This poll never touched the device, so it proves nothing about it.
+
+    Raised when the shared connect lock could not be taken in time. Deliberately
+    NOT an UpdateFailed: a skipped cycle must not increment the failure counter,
+    must not extend the timeout streak, must not close a pairing window and must
+    not flip healthy entities unavailable. It is queue congestion between our own
+    coordinators, not a statement about the thermostat.
+    """
+
+
 def _describe(err: BaseException) -> str:
     """Render an exception for a user-visible message.
 
@@ -309,6 +320,17 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         """Poll the device, tracking sustained failures for a repair issue."""
         try:
             data = await self._async_poll()
+        except _PollSkipped as err:
+            # A cycle that never reached the device. Serve the last good data if
+            # there is any (the device is not known to be in trouble, so its
+            # entities must not blink), otherwise report a plain failure â€” but
+            # in NEITHER case touch a counter, a streak or the pairing window.
+            # Raised inside this except clause, the UpdateFailed below does not
+            # re-enter the sibling clause, so nothing is accumulated.
+            _LOGGER.debug("Skipping this poll of %s: %s", self.address, err)
+            if self.data:
+                return self.data
+            raise UpdateFailed(str(err)) from None
         except UpdateFailed as err:
             self._pairing.fail_count += 1
             if self._pairing.fail_count >= UNREACHABLE_THRESHOLD:
@@ -432,13 +454,35 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         filtering side of it lives in __init__._candidates.)
         """
         connect_budget = self._async_apply_pair_budget()
+        # Serialized: a connect storm across devices is what pushes valid bonds
+        # past their pairing timeout in the first place. But the lock is shared
+        # by EVERY Madoka coordinator and is held across pymadoka's own retry
+        # backoff (sleep 5->10->20->40->60 plus a fixed 2s, all inside start()),
+        # so one device with a dead bond used to park it for a whole connect
+        # budget while doing nothing â€” delaying healthy devices, congesting the
+        # proxies and manufacturing the pair timeouts that convict them. That is
+        # the cascade that turned one bad bond into several (field incident
+        # 2026-07-26), and waiting was unbounded: N stuck devices stacked N
+        # budgets serially before this coordinator's own timer even started.
+        #
+        # The sleeps live inside the library and cannot be moved out without an
+        # upstream change, so the locked region cannot be shortened here: bound
+        # the WAIT instead. Waiting longer than one full attempt of our own
+        # profile means the queue ahead of us is already longer than the work we
+        # came to do â€” give up this cycle and let the next poll retry. Combined
+        # with the timeout backoff, a stalling device polls rarely and therefore
+        # contends rarely.
+        lock = _async_connect_lock(self.hass)
         try:
-            # Serialized: a connect storm across devices is what pushes
-            # valid bonds past their pairing timeout in the first place.
-            async with _async_connect_lock(self.hass):
-                await asyncio.wait_for(
-                    self.controller.start(), timeout=connect_budget
-                )
+            async with asyncio.timeout(connect_budget):
+                await lock.acquire()
+        except TimeoutError:
+            raise _PollSkipped(
+                f"another Madoka device held the connect lock for "
+                f"{connect_budget}s"
+            ) from None
+        try:
+            await asyncio.wait_for(self.controller.start(), timeout=connect_budget)
         except PairingRequiredError as err:
             self._async_note_pairing_error(err)
             raise UpdateFailed(_describe(err)) from err
@@ -455,6 +499,8 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed(
                 f"Could not reconnect to {self.address}: {_describe(err)}"
             ) from err
+        finally:
+            lock.release()
         if (
             self.controller.connection.connection_status
             is not ConnectionStatus.CONNECTED
