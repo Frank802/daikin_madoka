@@ -16,11 +16,12 @@ ConfigEntryAuthFailed - see MadokaCoordinator._async_start_reauth for why
 stop the coordinator rescheduling itself).
 """
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pymadoka import PairingRequiredError
+from pymadoka import ConnectionException, PairingRequiredError
 from pymadoka.connection import ConnectionStatus
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -34,8 +35,10 @@ from custom_components.daikin_madoka.const import (
     CONF_PAIRING_STATE,
     CONF_PREFERRED_SOURCE,
     DOMAIN,
+    TIMEOUT_BACKOFF_INTERVAL_S,
 )
 from custom_components.daikin_madoka.coordinator import (
+    UNREACHABLE_THRESHOLD,
     MadokaCoordinator,
     async_pairing_state,
 )
@@ -267,6 +270,75 @@ async def test_reauth_failure_reports_it_in_the_form(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
+
+
+async def _brake(hass: HomeAssistant, coordinator: MadokaCoordinator) -> None:
+    """Drive the coordinator into the retry brake through failed polls."""
+    coordinator.controller.start = AsyncMock(side_effect=ConnectionException("silent"))
+    present, scanner = _patched_bluetooth()
+    with present, scanner:
+        for _ in range(UNREACHABLE_THRESHOLD):
+            await coordinator.async_refresh()
+    assert coordinator.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+
+
+async def test_reauth_submission_lifts_the_brake_and_retries_immediately(
+    hass: HomeAssistant, enable_bluetooth: None
+) -> None:
+    """The user is standing at the thermostat; a 900s timer is not an answer.
+
+    Same field report as the Reconnect button (2026-07-26): the recovery
+    action a repair sends the user to must produce an attempt NOW, and must
+    leave the device on its configured cadence afterwards rather than back
+    under the brake it was under before anyone intervened.
+    """
+    entry = _entry(hass)
+    controller = _controller(rounds=0)
+    coordinator = _coordinator(hass, entry, controller)
+    entry.runtime_data = {MAC: coordinator}
+    await _brake(hass, coordinator)
+    attempts = controller.start.await_count
+
+    result = await entry.start_reauth_flow(hass)
+    present, scanner = _patched_bluetooth()
+    with present, scanner, patch(VALIDATE, return_value=("cannot_connect", None)):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    # The re-pairing failed and is reported, so the flow stays open...
+    assert result["errors"] == {"base": "cannot_connect"}
+    # ...but the brake is gone and the coordinator tried again right away,
+    # rather than at the next 900s tick.
+    assert coordinator.pairing_backoff is False
+    assert coordinator.update_interval == timedelta(seconds=60)
+    assert controller.start.await_count > attempts
+
+    await coordinator.async_shutdown()
+
+
+async def test_reauth_success_leaves_no_brake_behind(
+    hass: HomeAssistant, enable_bluetooth: None
+) -> None:
+    """A reload rebuilds the coordinator from the entry: it must be clean."""
+    entry = _entry(hass)
+    controller = _controller(rounds=0)
+    coordinator = _coordinator(hass, entry, controller)
+    entry.runtime_data = {MAC: coordinator}
+    await _brake(hass, coordinator)
+
+    result = await entry.start_reauth_flow(hass)
+    with (
+        patch(SETUP_ENTRY, return_value=True),
+        patch(VALIDATE, return_value=(None, SOURCE)),
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert result["reason"] == "reauth_successful"
+    assert CONF_PAIRING_STATE not in entry.data
+    assert async_pairing_state(hass, MAC).backoff is False
+
+    await coordinator.async_shutdown()
 
 
 async def test_reauth_keeps_other_bonded_proxies(
