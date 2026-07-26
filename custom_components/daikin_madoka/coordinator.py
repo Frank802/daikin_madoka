@@ -17,17 +17,25 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
-    BOOT_PAIR_TIMEOUT,
+    AUTOMATIC_PAIR_TIMEOUT,
     BRC1H_NAME_PREFIX,
     CONF_BONDED_SOURCES,
     CONF_MAC,
     CONF_PREFERRED_SOURCE,
     CONNECT_TIMEOUT,
     DOMAIN,
+    PAIRING_CONNECT_TIMEOUT,
     PAIRING_WINDOW_TIMEOUT,
+    PAIRING_WINDOW_TTL_S,
     POLL_TIMEOUT,
     STALE_GRACE,
+    TIMEOUT_BACKOFF_INTERVAL_S,
 )
+
+try:  # pragma: no cover - exercised only against a future pymadoka
+    from pymadoka.connection import PAIRING_TIMEOUT_ROUNDS
+except ImportError:  # pragma: no cover - upstream rename guard
+    PAIRING_TIMEOUT_ROUNDS = 3
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +57,30 @@ PAIRING_STATE_KEY = f"{DOMAIN}_pairing_state"
 def _async_connect_lock(hass: HomeAssistant) -> asyncio.Lock:
     """Return the connect lock shared by every Madoka coordinator."""
     return hass.data.setdefault(CONNECT_LOCK_KEY, asyncio.Lock())
+
+
+def _describe(err: BaseException) -> str:
+    """Render an exception for a user-visible message.
+
+    str(TimeoutError()) is the empty string, and several BLE errors raise with
+    no message at all, which produced log lines ending in a bare "…: ". The
+    class name is never empty and is exactly the missing information.
+    """
+    return str(err) or type(err).__name__
+
+
+def connection_profile(pairing_window: bool) -> tuple[float, float]:
+    """Return (inner pair budget, outer connect budget) for one attempt.
+
+    The profile follows from who initiated the attempt: an automatic reconnect
+    needs no human (a bonded path re-encrypts on its own), a user-opened
+    pairing window does. Both obey the invariant documented in const.py — the
+    pair budget stays strictly below the connect budget, or the library can
+    never classify a failure and the quarantine stops working.
+    """
+    if pairing_window:
+        return PAIRING_WINDOW_TIMEOUT, PAIRING_CONNECT_TIMEOUT
+    return AUTOMATIC_PAIR_TIMEOUT, CONNECT_TIMEOUT
 
 
 @dataclass
@@ -73,12 +105,20 @@ class MadokaPairingState:
     # ~2 rounds, and the rebuilt Connection would restart the count at zero
     # (field incident 2026-07-21: an endless prompt salvo every 600s).
     timeout_rounds: int = 0
-    # True once a pairing refusal has been concluded. Automatic reconnects
-    # then stop touching the device entirely — every new attempt re-initiates
-    # SMP, which prompts a screen nobody is watching and, repeated, jams the
-    # BRC1H's Bluetooth stack. Lifted only by a deliberate user pairing
-    # action (the reconnect button) or a successful session.
+    # True once a pairing refusal has been PROVEN (a path explicitly rejected
+    # the bond). Automatic reconnects then stop touching the device entirely —
+    # every new attempt re-initiates SMP, which prompts a screen nobody is
+    # watching and, repeated, jams the BRC1H's Bluetooth stack. Lifted only by
+    # a deliberate user pairing action (the reconnect button) or a successful
+    # session. A mere timeout streak must never set this: on a bonded path a
+    # timeout means congestion, and convicting on it falsely locks out a
+    # perfectly healthy thermostat (field incident 2026-07-26).
     suspended: bool = False
+    # True while the device is in timeout backoff: pairing keeps timing out,
+    # which is evidence of *something* but proof of nothing. Not a conviction —
+    # the device is still probed, just far more slowly. Survives the
+    # coordinator rebuild for the same reason timeout_rounds does.
+    backoff: bool = False
 
 
 def async_pairing_state(hass: HomeAssistant, address: str) -> MadokaPairingState:
@@ -110,17 +150,12 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         self._fail_count = 0
         self._issue_active = False
         self._pairing_issue_active = False
+        self._pairing_slow_issue_active = False
         self._boost_unsub: CALLBACK_TYPE | None = None
-        # The congestion-prone boot window: right after entry setup (and every
-        # ConfigEntryNotReady retry, which rebuilds this coordinator) the
-        # proxies are busy and a valid bond encrypts slowly. While this is set,
-        # the connect path widens the pairing budget so a slow-but-valid bond
-        # completes instead of being misread as a timeout and quarantined. It
-        # is cleared on the first successful poll, reverting to the tight
-        # default for steady-state. The original (tight) budget is captured so
-        # the revert restores whatever the controller was built with.
-        self._boot_window = True
-        self._default_pair_timeout = controller.connection.pair_timeout
+        # Cancel handle of the pairing window's time-to-live timer, and the
+        # poll interval to go back to once a timeout backoff ends.
+        self._pairing_window_unsub: CALLBACK_TYPE | None = None
+        self._normal_interval: timedelta | None = None
         # Pairing suspension and window live in hass.data keyed by MAC, so
         # they survive the Controller/coordinator being rebuilt on a config
         # entry retry. last_error is chained onto the skipped polls'
@@ -137,6 +172,19 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             name=f"{DOMAIN}-{controller.connection.address}",
             update_interval=timedelta(seconds=scan_interval),
         )
+        # The pairing budget has exactly one owner (see connection_profile):
+        # apply it up front so the controller never runs on whatever default
+        # it happened to be built with.
+        self._async_apply_pair_budget()
+        if self._pairing.backoff:
+            # A rebuild must not hand a stalling device the fast cadence back;
+            # the state is per-MAC precisely so it outlives this object.
+            self._normal_interval = timedelta(seconds=scan_interval)
+            self.update_interval = timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+        if self._pairing.pairing_window:
+            # Same reason: a window whose TTL timer died with the previous
+            # coordinator would otherwise stay open forever.
+            self._async_arm_pairing_window_timer()
 
     async def _async_update_data(self) -> dict:
         """Poll the device, tracking sustained failures for a repair issue."""
@@ -183,11 +231,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # async_shutdown_extras) must NOT lift the suspension, or a simple
         # entry reload would grant a dead bond a fresh prompt salvo.
         self._clear_pairing_suspension()
-        # The congested boot window is over the moment one poll succeeds:
-        # revert to the tight steady-state pairing budget so ordinary
-        # reconnects fail fast instead of holding a proxy slot for the wide
-        # boot budget.
-        self._close_boot_window()
+        self._async_restore_normal_interval()
         self._async_persist_preferred_source()
         return data
 
@@ -219,53 +263,25 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
                     f"{self.address} needs pairing; automatic reconnects are "
                     "suspended until the reconnect button is pressed"
                 ) from self._pairing.last_error
-            if self._boot_window and not self._pairing.pairing_window:
-                # Boot window: widen the pairing budget so a valid bond that
-                # encrypts slowly under proxy congestion completes instead of
-                # timing out. Skipped while a user pairing window is open — it
-                # already set its own (wider, human-sized) budget and must keep
-                # it. A genuine auth rejection is immediate, not a timeout, so
-                # this never delays quarantining a truly dead bond.
-                self.controller.connection.pair_timeout = BOOT_PAIR_TIMEOUT
             try:
-                # Serialized: a connect storm across devices is what pushes
-                # valid bonds past their pairing timeout in the first place.
-                async with _async_connect_lock(self.hass):
-                    await asyncio.wait_for(
-                        self.controller.start(), timeout=CONNECT_TIMEOUT
-                    )
-            except PairingRequiredError as err:
-                self._note_pairing_failure(err)
-                self._raise_pairing_issue(err)
-                raise UpdateFailed(str(err)) from err
-            except Exception as err:
-                # DeviceUnreachableError (and a wait_for TimeoutError) lands
-                # here on purpose: both feed the threshold-based
-                # device_unreachable repair, not a dedicated issue.
-                # Persist the all-paths-timed-out streak first: this is the
-                # very failure mode where the attempt got cancelled before
-                # the library could reach its own 3-round conclusion. The max
-                # guard keeps a round-less failure (device off, streak-blind
-                # future library) from erasing an accumulated streak.
-                rounds = getattr(
-                    self.controller.connection, "pairing_timeout_rounds", 0
-                )
-                if isinstance(rounds, int):
-                    self._pairing.timeout_rounds = max(
-                        self._pairing.timeout_rounds, rounds
-                    )
-                raise UpdateFailed(f"Could not reconnect to {self.address}: {err}") from err
-            if (
-                self.controller.connection.connection_status
-                is not ConnectionStatus.CONNECTED
-            ):
-                raise UpdateFailed(f"Device {self.address} is not reachable")
+                await self._async_connect()
+            except UpdateFailed:
+                # A pairing window is permission for ONE deliberate attempt.
+                # That attempt just failed, so the window closes here: leaving
+                # it open would keep unbonded proxies reachable by unattended
+                # polls, keep the human-sized SMP budget on them, and keep the
+                # dead-bond quarantine disarmed — the exact combination that
+                # turns one failed Reconnect into a pairing storm.
+                self._async_close_pairing_window()
+                raise
 
         try:
             async with asyncio.timeout(POLL_TIMEOUT):
                 await self.controller.update()
         except (ConnectionAbortedError, ConnectionException) as err:
-            raise UpdateFailed(f"Could not update {self.address}: {err}") from err
+            raise UpdateFailed(
+                f"Could not update {self.address}: {_describe(err)}"
+            ) from err
         except TimeoutError as err:
             raise UpdateFailed(
                 f"Polling {self.address} exceeded {POLL_TIMEOUT}s"
@@ -287,6 +303,44 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed(f"Device {self.address} did not answer any query")
 
         return status
+
+    async def _async_connect(self) -> None:
+        """Establish the BLE link under the profile this attempt earned.
+
+        Everything about the attempt — which proxies are reachable, how long
+        pairing may take, how long the whole connect may take — follows from
+        one bit: is a user-initiated pairing window open? (The candidate
+        filtering side of it lives in __init__._candidates.)
+        """
+        connect_budget = self._async_apply_pair_budget()
+        try:
+            # Serialized: a connect storm across devices is what pushes
+            # valid bonds past their pairing timeout in the first place.
+            async with _async_connect_lock(self.hass):
+                await asyncio.wait_for(
+                    self.controller.start(), timeout=connect_budget
+                )
+        except PairingRequiredError as err:
+            self._async_note_pairing_error(err)
+            raise UpdateFailed(_describe(err)) from err
+        except Exception as err:
+            # DeviceUnreachableError (and a wait_for TimeoutError) lands
+            # here on purpose: both feed the threshold-based
+            # device_unreachable repair, not a dedicated issue.
+            # Persist the all-paths-timed-out streak first: this is the
+            # very failure mode where the attempt got cancelled before
+            # the library could reach its own 3-round conclusion. The max
+            # guard keeps a round-less failure (device off, streak-blind
+            # future library) from erasing an accumulated streak.
+            self._note_timeout_rounds()
+            raise UpdateFailed(
+                f"Could not reconnect to {self.address}: {_describe(err)}"
+            ) from err
+        if (
+            self.controller.connection.connection_status
+            is not ConnectionStatus.CONNECTED
+        ):
+            raise UpdateFailed(f"Device {self.address} is not reachable")
 
     async def async_boost(self) -> None:
         """Refresh now and once more shortly after.
@@ -324,8 +378,7 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # no bond yet, and widen the pairing budget so a human can actually
         # compare codes and confirm.
         self._clear_pairing_suspension()
-        self._pairing.pairing_window = True
-        conn.pair_timeout = PAIRING_WINDOW_TIMEOUT
+        self._async_open_pairing_window()
         # The BRC1H stops advertising while connected and takes a moment to
         # resume after a disconnect; refreshing instantly would fail fast with
         # "not advertising" and defer the reconnect to the next poll.
@@ -378,8 +431,9 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
     def _raise_unreachable_issue(self) -> None:
         # A sustained pairing refusal also trips the failure threshold; the
         # unreachable advice (power/range) would be wrong next to the
-        # pairing_required ERROR, so keep that single repair on screen.
-        if self._pairing_issue_active:
+        # pairing_required ERROR (or the pairing_slow WARNING, which tells the
+        # opposite story), so keep that single repair on screen.
+        if self._pairing_issue_active or self._pairing_slow_issue_active:
             return
         if self._issue_active:
             return
@@ -396,27 +450,147 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         )
 
     @callback
+    def _async_apply_pair_budget(self) -> float:
+        """Set the pairing budget for the active profile; return the outer one.
+
+        THE single writer of connection.pair_timeout. Every other path (open a
+        window, close a window, connect) goes through here, so the budget can
+        never be left at a value some earlier code path happened to set — the
+        leak that kept a 60s human budget armed on unattended reconnects.
+        """
+        pair_budget, connect_budget = connection_profile(self._pairing.pairing_window)
+        self.controller.connection.pair_timeout = pair_budget
+        return connect_budget
+
+    @callback
+    def _async_open_pairing_window(self) -> None:
+        """Grant one user-initiated pairing attempt, with a deadline."""
+        self._pairing.pairing_window = True
+        self._async_apply_pair_budget()
+        self._async_arm_pairing_window_timer()
+
+    @callback
+    def _async_arm_pairing_window_timer(self) -> None:
+        """(Re)start the window's time-to-live."""
+        self._async_cancel_pairing_window_timer()
+
+        @callback
+        def _expire(_now) -> None:
+            self._pairing_window_unsub = None
+            if self._pairing.pairing_window:
+                _LOGGER.debug(
+                    "Pairing window for %s expired after %ss",
+                    self.address,
+                    PAIRING_WINDOW_TTL_S,
+                )
+            self._async_close_pairing_window()
+
+        self._pairing_window_unsub = async_call_later(
+            self.hass, PAIRING_WINDOW_TTL_S, _expire
+        )
+
+    @callback
+    def _async_cancel_pairing_window_timer(self) -> None:
+        if self._pairing_window_unsub is not None:
+            self._pairing_window_unsub()
+            self._pairing_window_unsub = None
+
+    @callback
+    def _async_close_pairing_window(self) -> None:
+        """Close the window and hand the pairing budget back to AUTOMATIC.
+
+        Idempotent, and the only close path: whether the attempt succeeded,
+        failed or was never made, an open window lifts the bonded-proxy
+        restriction and disarms the quarantine, so it must always end.
+        """
+        self._async_cancel_pairing_window_timer()
+        if not self._pairing.pairing_window:
+            return
+        self._pairing.pairing_window = False
+        self._async_apply_pair_budget()
+
+    @callback
+    def _note_timeout_rounds(self) -> None:
+        """Carry the library's all-paths-timed-out streak across rebuilds."""
+        rounds = getattr(self.controller.connection, "pairing_timeout_rounds", None)
+        if isinstance(rounds, int) and not isinstance(rounds, bool):
+            self._pairing.timeout_rounds = max(self._pairing.timeout_rounds, rounds)
+
+    @callback
+    def _async_note_pairing_error(self, err: PairingRequiredError) -> None:
+        """Decide what a PairingRequiredError actually proves, and react.
+
+        pymadoka raises the same exception, with the same message and
+        attributes, for two epistemically different events: a path that
+        explicitly REJECTED the authenticated bond (a human must re-pair) and
+        every path merely TIMING OUT for PAIRING_TIMEOUT_ROUNDS rounds (an
+        inference congestion alone can produce). The only side channel is the
+        public round counter: the rejection raise resets it to 0, the streak
+        raise leaves it at the threshold. It is undocumented and fragile, so
+        anything we cannot read as an integer takes the non-convicting branch
+        — a wrong quarantine needs a human at the thermostat to undo, a wrong
+        backoff only costs time. The robust fix is upstream: a `reason`
+        attribute on PairingRequiredError (see docs/plans, section 7).
+        """
+        rounds = getattr(self.controller.connection, "pairing_timeout_rounds", None)
+        proven_rejection = (
+            isinstance(rounds, int) and not isinstance(rounds, bool) and rounds == 0
+        )
+        if proven_rejection:
+            self._note_pairing_failure(err)
+            self._raise_pairing_issue(err)
+            return
+        _LOGGER.warning(
+            "%s did not complete pairing after %s timed-out rounds; slowing "
+            "reconnects to %ss instead of concluding it refused the bond",
+            self.address,
+            rounds if isinstance(rounds, int) else PAIRING_TIMEOUT_ROUNDS,
+            TIMEOUT_BACKOFF_INTERVAL_S,
+        )
+        self._note_timeout_rounds()
+        self._async_enter_timeout_backoff(err)
+
+    @callback
     def _note_pairing_failure(self, err: PairingRequiredError) -> None:
         """Suspend automatic reconnects: each retry would re-prompt the screen."""
         self._pairing.last_error = err
         self._pairing.suspended = True
+        self._pairing.backoff = False
         # The accusation has been delivered; the streak starts over after the
         # user re-pairs.
         self._pairing.timeout_rounds = 0
 
     @callback
-    def _close_boot_window(self) -> None:
-        """End the congested-boot pairing grace after the first success.
+    def _async_enter_timeout_backoff(self, err: PairingRequiredError) -> None:
+        """Slow down hard, but never convict.
 
-        Only closes the boot window itself and restores the tight budget; a
-        user-opened pairing window owns its own (wider) budget and closes via
-        _clear_issues, so leave it alone here.
+        A timeout streak is evidence of something and proof of nothing. On a
+        bonded path it usually means congestion (and the device recovers on
+        its own), but a genuinely dead BRC1H bond also fails by silent
+        timeout — so attempts must neither stop (the device would never come
+        back without a human) nor continue at poll cadence (that is the SMP
+        prompt storm). One attempt every TIMEOUT_BACKOFF_INTERVAL_S, plus a
+        repair that suggests re-pairing without asserting a refusal.
         """
-        if not self._boot_window:
+        self._pairing.last_error = err
+        self._pairing.backoff = True
+        self._raise_pairing_slow_issue(err)
+        backoff = timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S)
+        if self.update_interval != backoff:
+            self._normal_interval = self.update_interval
+            self.update_interval = backoff
+
+    @callback
+    def _async_restore_normal_interval(self) -> None:
+        """Back to the configured cadence after a successful poll."""
+        self._pairing.backoff = False
+        if self._normal_interval is None:
             return
-        self._boot_window = False
-        if not self._pairing.pairing_window:
-            self.controller.connection.pair_timeout = self._default_pair_timeout
+        # If the user changed the poll interval meanwhile, the options update
+        # listener already wrote it: leave their value alone.
+        if self.update_interval == timedelta(seconds=TIMEOUT_BACKOFF_INTERVAL_S):
+            self.update_interval = self._normal_interval
+        self._normal_interval = None
 
     @callback
     def _clear_pairing_suspension(self) -> None:
@@ -447,6 +621,29 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             learn_more_url=DOCS_URL,
         )
 
+    @callback
+    def _raise_pairing_slow_issue(self, err: PairingRequiredError) -> None:
+        """Warn that pairing never completes — without accusing the device.
+
+        Deliberately WARNING, not ERROR, and worded as a suggestion: the only
+        thing established here is that the handshake keeps timing out, which a
+        congested proxy explains just as well as a lost bond.
+        """
+        self._pairing_slow_issue_active = True
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            f"pairing_slow_{self.address}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="pairing_slow",
+            translation_placeholders={
+                "device": self.device_name,
+                "proxies": self._proxy_names(err.tried_sources),
+            },
+            learn_more_url=DOCS_URL,
+        )
+
     def _proxy_names(self, sources: list[str | None]) -> str:
         """Resolve proxy source MACs to human-readable scanner names."""
         names = []
@@ -465,20 +662,25 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # the fresh coordinator instance.
         self._issue_active = False
         self._pairing_issue_active = False
+        self._pairing_slow_issue_active = False
         # The window is permission for one deliberate attempt, not a standing
         # grant: close it as soon as the device is reachable again. The
         # suspension is deliberately NOT cleared here — this also runs on
         # unload, and a reload must not re-arm the prompt salvo.
-        self._pairing.pairing_window = False
+        self._async_close_pairing_window()
         ir.async_delete_issue(self.hass, DOMAIN, f"unreachable_{self.address}")
         ir.async_delete_issue(self.hass, DOMAIN, f"pairing_required_{self.address}")
+        ir.async_delete_issue(self.hass, DOMAIN, f"pairing_slow_{self.address}")
 
     @callback
     def async_shutdown_extras(self) -> None:
-        """Cancel a pending boost and clear the repair issues on unload."""
+        """Cancel pending timers and clear the repair issues on unload."""
         if self._boost_unsub is not None:
             self._boost_unsub()
             self._boost_unsub = None
+        # Explicit even though _clear_issues closes the window too: an armed
+        # TTL callback must never outlive the coordinator it points at.
+        self._async_cancel_pairing_window_timer()
         self._clear_issues()
 
     @property
@@ -500,6 +702,16 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
     def pairing_issue_active(self) -> bool:
         """True while this coordinator has a pairing_required repair open."""
         return self._pairing_issue_active
+
+    @property
+    def pairing_slow_issue_active(self) -> bool:
+        """True while this coordinator has a pairing_slow repair open."""
+        return self._pairing_slow_issue_active
+
+    @property
+    def pairing_backoff(self) -> bool:
+        """True while pairing timeouts have slowed this device's polling."""
+        return self._pairing.backoff
 
     @property
     def address(self) -> str:

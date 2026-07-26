@@ -108,6 +108,8 @@ def _controller(status: ConnectionStatus, source: str | None = BONDED) -> MagicM
     controller.connection.connection_status = status
     controller.connection.connected_source = source
     controller.connection.pair_timeout = 8.0
+    # Round counter as the library leaves it after a proven refusal.
+    controller.connection.pairing_timeout_rounds = 0
     controller.update = AsyncMock()
     controller.refresh_status.return_value = {"set_point": {"cooling_set_point": 25}}
     return controller
@@ -139,11 +141,24 @@ def _patched_bluetooth():
 
 
 async def test_reconnect_opens_a_pairing_window(hass: HomeAssistant) -> None:
-    """Pressing reconnect means the user is at the thermostat, ready to accept."""
+    """Pressing reconnect means the user is at the thermostat, ready to accept.
+
+    The window is what lifts the bonded-only restriction and widens the
+    pairing budget, so it must be open *during* the attempt it authorises.
+    Its closing (on failure, on expiry, on success) is specified in
+    test_pairing_window_lifecycle.py.
+    """
     entry = MockConfigEntry(domain=DOMAIN, data={CONF_MAC: MAC})
     entry.add_to_hass(hass)
     controller = _controller(ConnectionStatus.DISCONNECTED)
-    controller.start = AsyncMock(side_effect=PairingRequiredError(MAC, [BONDED]))
+    state = async_pairing_state(hass, MAC)
+    seen: list[tuple[bool, float]] = []
+
+    async def _connect() -> None:
+        seen.append((state.pairing_window, controller.connection.pair_timeout))
+        raise PairingRequiredError(MAC, [BONDED])
+
+    controller.start = AsyncMock(side_effect=_connect)
     controller.stop = AsyncMock()
     coordinator = _coordinator(hass, entry, controller)
 
@@ -153,9 +168,7 @@ async def test_reconnect_opens_a_pairing_window(hass: HomeAssistant) -> None:
     ):
         await coordinator.async_reconnect()
 
-    state = async_pairing_state(hass, MAC)
-    assert state.pairing_window is True
-    assert controller.connection.pair_timeout == PAIRING_WINDOW_TIMEOUT
+    assert seen == [(True, PAIRING_WINDOW_TIMEOUT)]
 
     await coordinator.async_shutdown()
 

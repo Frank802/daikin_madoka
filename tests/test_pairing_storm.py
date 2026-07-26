@@ -44,6 +44,11 @@ def _disconnected_controller(mac: str = MAC) -> MagicMock:
     controller.connection.name = "Daikin"
     controller.connection.connection_status = ConnectionStatus.DISCONNECTED
     controller.connection.connected_source = SOURCE
+    # A proven auth rejection: the library resets its round counter before
+    # raising PairingRequiredError for a refusal, and leaves it at
+    # PAIRING_TIMEOUT_ROUNDS for a mere timeout streak (which must NOT
+    # quarantine — see test_pairing_verdict_tiers.py).
+    controller.connection.pairing_timeout_rounds = 0
     controller.update = AsyncMock()
     controller.refresh_status.return_value = {"set_point": {"cooling_set_point": 25}}
     return controller
