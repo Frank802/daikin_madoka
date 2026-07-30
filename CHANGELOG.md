@@ -1,13 +1,138 @@
 # Changelog
 
-## v3.2.0 - July 2026
+## v3.9.0 - July 2026
 
 ### Daikin VAM (ventilation) support
+
+Builds on the v3.8.x connection-layer rewrite (requires **pymadoka-ng 0.3.10**, installed automatically) and adds ventilation-only appliances.
 
 - **New: ventilation units (VAM / HRV).** Both integrations now support Daikin VAM units — ventilation-only indoor units driven by the same BRC1H controller over the same BLE protocol (operation mode 5 = VENTILATION, no temperature setpoint).
   - **HA integration**: the config flow now asks for the **appliance type** (*thermostat* or *ventilation*). A ventilation device exposes an **Off / Fan only** climate entity with fan-speed control and indoor/outdoor temperature — no target temperature.
   - **ESPHome**: new dedicated **`madoka_vam`** platform (Off / Fan only, fan LOW/MEDIUM/HIGH/AUTO, current temperature, optional `outdoor_temperature` and `firmware_version`).
 - **Reverse-engineering tooling** to map VAM-specific features later: a `dump_raw` option on `madoka_vam` (hex-logs every BLE frame and any unhandled function ID), a public `send_raw_command()` probe callable from a lambda, and a capture guide at [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md).
+
+## v3.8.1 - July 2026
+
+Requires **pymadoka-ng 0.3.10** (installed automatically). The library now states outright *why* pairing failed instead of leaving it to be inferred from a side effect, which is what v3.8.0 already reads when the attribute is there — this release simply makes it the version you actually run.
+
+- **Re-pairing a thermostat now does something you can see.** When the retry cadence had been slowed to 15 minutes, walking to the thermostat and re-pairing it changed nothing for up to a quarter of an hour: the brake was still running and the recovery action looked inert. Pressing **Reconnect**, or submitting the re-pairing form, now lifts the brake, connects straight away and — if that attempt still fails — leaves the thermostat on its normal poll interval instead of putting it back under the 15-minute one. The warning disappears as soon as a connection actually succeeds, as before.
+- **"Pairing not completing" no longer re-fires on the first slow round.** The integration keeps its own copy of the timed-out-round streak so it survives a rebuilt connection; it now spends that streak when the warning is raised, exactly as the library spends its own. Without that, every rebuilt connection started at the threshold and one more slow round was enough to raise the same verdict again. The 15-minute retry cadence and the warning itself are unchanged.
+
+## v3.8.0 - July 2026
+
+**A thermostat can no longer become unrecoverable.** This release rewrites the connection, pairing and recovery layer after a full review of it. Three field incidents drove it: a thermostat with a perfectly good bond was quarantined as "refused the pairing" and locked out; two others ended up in `setup_retry`, where *every* entity vanishes — including the **Reconnect** button the integration's own notification tells you to press; and neither could be re-paired by any documented route, because the 60-second "walk to the thermostat" budget was nested inside a 30-second connect budget and was silently cancelled at ~28 s.
+
+### A pairing timeout is no longer treated as a refusal
+
+A bond is per-proxy, and automatic reconnects only ever use proxies known to hold one. On such a path nobody has to touch the thermostat, so a pairing *timeout* there means congestion — not a lost bond. Only an explicit refusal now quarantines a device. A run of timeouts instead slows the retry cadence right down and raises a plain warning that says pairing is not completing, without accusing the thermostat of anything.
+
+The pairing budgets were re-derived so this can actually be measured: each budget is now sized against the number of proxies that will be tried, so the attempt always fits inside the connect budget. Previously, with two or more proxies in range, no verdict could ever form at all. A retry-cadence brake also engages on repeated failure regardless of the verdict, so a thermostat that never answers is polled every 15 minutes rather than every minute.
+
+### Recovery is always reachable
+
+- A configured thermostat now **always loads**, degraded when it cannot connect, instead of disappearing into `setup_retry`. Its entities exist and read `unavailable` — the Reconnect button among them.
+- A new **re-pairing flow** appears on the integration entry after a genuine refusal, with a Fix button, and works even when no entity is available. It reports success or failure instead of leaving you guessing.
+- Every pairing flow — initial setup, Reconnect, re-pairing — now gets a real human-sized budget.
+- The pairing window is bounded and always closes. A failed Reconnect used to leave it open forever, which quietly disarmed the quarantine and lifted the bonded-proxy restriction.
+- The verdict and failure counter survive a restart, and are purged when the entry is removed.
+
+### Seeing what is going on
+
+- New **Connection status** sensor: `connected`, `retrying`, `pairing not completing`, `pairing required`, `not advertising`.
+- **Connection source** is now enabled by default, and it and the signal-strength sensor stay available when the link is down — they read Home Assistant's own data and never needed the thermostat.
+- Diagnostics no longer crash for a thermostat that never connected, and error messages no longer end in a bare colon.
+- Proxies with no free connection slot are tried last, so a saturated proxy stops blocking a thermostat while others sit idle.
+- Bonds are recorded as soon as pairing succeeds, and a proxy that keeps refusing is dropped — never the last one.
+- Renaming a thermostat no longer wipes its list of bonded proxies.
+
+### Madoka Card 0.7.0 → 0.7.1
+
+The card no longer reports a successful reconnect that never happened: it shows a real pending state while the call is in flight, and a visible error if it fails. Hard-refresh your browser once after updating.
+
+### ESPHome component — breaking change
+
+The dual setpoint was hardcoded, so the ESP32 entity always exposed two temperatures regardless of the thermostat's range setting. It is now the `dual_setpoint:` option, **defaulting to a single setpoint**. If you rely on the dual UI — or call `climate.set_temperature` with `target_temp_low`/`target_temp_high` on an ESPHome Madoka entity — add `dual_setpoint: true` to the climate block and recompile. Home Assistant's own integration is unaffected; it already switched automatically.
+
+## v3.7.1 - July 2026
+
+**No more false "pairing required" quarantine on a Home Assistant restart.** Right after a restart the Bluetooth proxies are briefly congested, so a *valid* bond's SMP encryption runs slowly. The tight 8 s pairing budget could then time out and be misread as a lost bond, quarantining a thermostat that was never actually unbonded — typically one reached through a single, busy proxy. During the post-restart window the pairing budget is now widened (30 s) so a slow-but-valid bond has room to complete, then reverts to the tight budget once the device is back. A genuinely dead bond (an outright authentication rejection) still quarantines immediately, and the manual **Reconnect** window is unchanged.
+
+## v3.7.0 - July 2026
+
+### Madoka Card (0.7.0)
+
+- **Reconnect where you see the problem**: when the thermostat goes unreachable, the card now surfaces its **Reconnect** button instead of leaving you with dead controls — a banner in the `full`/`compact` layouts, and in the `tile` layout in place of the inert `−`/`+` pair. It shows a "reconnecting…" state while the BLE link is re-established and disappears on its own once the device is back. Configurable with `reconnect: auto | always | never` (default `auto`), or point it at a specific entity with `reconnect_entity:`.
+- The card finds the Reconnect button on its own from the thermostat's device — no configuration, and it is never confused with the *Reset filter* button (matched on the registry translation key, so a rename cannot break it).
+- The `−`/`+`/power controls of the full layout are now disabled while the thermostat is unavailable.
+- Bundled card bumped to 0.7.0 — hard-refresh the browser once after updating.
+- Docs: the README now shows the card (light and dark screenshots, served per the reader's theme).
+
+## v3.6.0 - July 2026
+
+**A dead bond can no longer flood the thermostat** — fixes the slow-motion pairing storm v3.5.0 left open ([#41](https://github.com/dasimon135/daikin_madoka/issues/41)). When a proxy listed as bonded had actually lost its bond, every 600 s setup retry re-initiated an SMP exchange with an 8 s budget no human can meet — an endless salvo of prompts that eventually jams the thermostat.
+
+- **The pairing-timeout streak survives entry retries.** The library's 3-round threshold was unreachable because Home Assistant rebuilds the connection on every retry and the counter restarted from zero; it now continues across rebuilds, so the refusal is actually concluded and the repair fires.
+- **A concluded refusal suspends automatic reconnects indefinitely** instead of re-prompting a screen nobody is watching every 5 minutes. The device is left alone until you press **Reconnect** (which opens the 60 s pairing window) or a session succeeds; the suspension survives retries and reloads.
+- **A suspended device still loads** in a degraded state, so the Reconnect button — the only remedy — actually exists. Previously the entry never finished setting up and the button never appeared.
+- Repair text rewritten (en/fr/es); diagnostics expose `pairing_suspended`.
+- Docs: dropped `CONFIG_BLE_SM_SC` / `CONFIG_BLE_SM_LEGACY` from the proxy guide — NimBLE symbols the Bluedroid stack never reads. A stock proxy only needs `io_capability: display_yes_no`.
+- No dependency change (pymadoka-ng stays at 0.3.9).
+
+[Full release notes](https://github.com/dasimon135/daikin_madoka/releases/tag/v3.6.0)
+
+## v3.5.0 - July 2026
+
+**Pairing becomes a deliberate act** — fixes the root cause behind the phantom pairing prompts that v3.4.0 only partly contained. A proxy sitting closer to a thermostat wins the RSSI ordering and gets tried first on every reconnect while holding *no bond*, so each attempt began a real numeric-comparison pairing nobody could confirm in time — and those half-finished SMP exchanges jam the BRC1H.
+
+- **Automatic reconnects can no longer start a pairing.** Every proxy that completes an authenticated session is recorded as bonded, and unattended reconnects are restricted to those, so they can only ever re-encrypt an existing bond. Entries predating the list fall back to their known preferred proxy; an install with nothing on record stays unrestricted so a first connect still works.
+- **The reconnect button opens a pairing window**: pressing it means you are standing at the thermostat, so unbonded proxies become reachable and the pairing budget widens to 60 s — enough to compare the code and accept. The window closes on the next successful poll.
+- **Pairing state survives the config-entry retry cycle** (moved to `hass.data`), so the backoff actually accumulates — on the coordinator it reset on every retry and never did.
+- Requires **pymadoka-ng 0.3.9** (configurable pairing budget).
+
+[Full release notes](https://github.com/dasimon135/daikin_madoka/releases/tag/v3.5.0)
+
+## v3.4.0 - July 2026
+
+**No more phantom pairing prompts** — fixes a failure mode where the integration wrongly concluded a thermostat had lost its bond, put a pairing prompt on its screen, and by retrying every poll jammed its Bluetooth stack until it was toggled off and on by hand. Under the connection contention of a restart, the encryption handshake of an **already valid** bond routinely exceeded its timeout, and a timeout was treated as proof the bond was gone.
+
+- **A pairing timeout is no longer proof of a missing bond** (via pymadoka-ng 0.3.8): it is treated as ambiguous and retried, and the pairing error is only reported after several consecutive rounds in which *every* path timed out. An explicit authentication rejection still reports immediately.
+- **Connects are serialized across devices**, so thermostats stop competing for the proxies that serve them. The lock is only held around a reconnect, never around a normal poll.
+- **A pairing refusal now backs off** (60 s, doubling, capped at 5 minutes) instead of re-attempting every poll. The reconnect button bypasses the backoff entirely.
+
+[Full release notes](https://github.com/dasimon135/daikin_madoka/releases/tag/v3.4.0)
+
+## v3.3.0 - July 2026
+
+Quality release: easier reconfiguration, better observability, and a big step up in internal quality (typing, CI, test coverage).
+
+- **Reconfigure flow**: rename a thermostat or change its MAC address from the entry's ⋮ menu — no more delete + re-add. A MAC change runs the full authenticated connection test before being accepted.
+- **New "Connection source" diagnostic sensor** (disabled by default — enable it on the device page): shows which Bluetooth proxy each thermostat is currently connected through. In multi-proxy homes this answers the #1 debugging question at a glance.
+- **Richer diagnostics download**: now includes coordinator health (last update success, failure count, update interval, active repair flags and the resolved preferred proxy) — much more useful bug reports.
+- **Fixes**: removed a latent `HVACMode.OFF → AUTO` mapping that could have silently switched the unit to AUTO; README entity list updated (operating time sensor, reconnect button).
+- **Internal quality**: migration to `ConfigEntry.runtime_data`, full type annotations with mypy in CI, test coverage measured in CI (40% → 81%, climate 90%), Dependabot, pinned CI actions, pre-commit hooks.
+
+## v3.2.0 - July 2026
+
+Validated on hardware (4 thermostats, 4 proxies) — including a live replay of
+the incident that motivated this release.
+
+Multi-proxy robustness: reliable in homes with several Bluetooth proxies and several thermostats.
+
+- **Sticky proxy**: the integration remembers which proxy last authenticated with each thermostat and tries it first on every reconnect. A closer proxy that has no bond can no longer steal the connection and take the thermostat down with `Insufficient authentication`.
+- **`pairing_required` repair**: when every connection path refuses the link for lack of a bond, an actionable repair appears that **names the refusing proxies**, so you know exactly which one to pair (or set passive) — see the new [ESPHome proxy reference](docs/esphome-proxy.md).
+- **Stale-value grace**: 1–2 transient poll failures no longer punch holes in graphs or flicker entities to unavailable — sensors keep their last value for a short grace period while the connection recovers. Real outages (and pairing failures) still surface immediately.
+- **Saner discovery & onboarding**: discovery ignores advertisements below −90 dBm (no more discovery cards for out-of-home devices at the edge of range), and the config flow now tests the connection — including pairing — before creating the entry, so a misconfigured setup fails in the flow instead of producing a dead device.
+- **Registry hygiene**: orphaned devices left behind by removed entries are cleaned up at startup, and devices can now be deleted individually from the device page.
+- Requires **pymadoka-ng 0.3.7** (typed connection errors, candidate proxy list, preferred-proxy support; 0.3.7 additionally makes each connection attempt a single path decision, so a mid-retry failover can no longer hand the device to an unbonded proxy; installed automatically).
+
+## v3.1.1 - July 2026
+
+- **Config flow**: manual setup ("Add integration") now takes over a pending
+  Bluetooth discovery flow for the same device instead of aborting with
+  `already_in_progress`; the discovery card is dismissed automatically once
+  the entry is created.
+- **Tests/CI**: first pytest suite (Home Assistant test harness) wired into
+  the CI workflow alongside ruff.
 
 ## v3.1.0 - July 2026
 

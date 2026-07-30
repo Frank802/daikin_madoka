@@ -47,9 +47,13 @@ Each thermostat creates:
 - `climate.*` — thermostat (mode, setpoint, fan speed, current temperature; separate heating/cooling setpoints in AUTO mode when the device has range mode enabled)
 - `sensor.*_indoor_temperature` — indoor temperature
 - `sensor.*_outdoor_temperature` — outdoor temperature
+- `sensor.*_operating_time` — cumulative hours the unit has been running (coarse, poll-interval granularity; persisted across restarts)
 - `sensor.*_signal_strength` — Bluetooth RSSI (diagnostic, disabled by default)
+- `sensor.*_connection_source` — which BLE path serves the thermostat: active proxy while connected, preferred (bonded) proxy otherwise (diagnostic)
+- `sensor.*_connection_status` — `connected` / `retrying` / `pairing_slow` / `needs_pairing` / `not_advertising` (diagnostic). Tells the failures apart at a glance: `not_advertising` means no proxy can see the thermostat (range, power), `needs_pairing` means a proxy was explicitly refused and you must re-pair, `pairing_slow` means the handshake keeps timing out (often just a busy proxy). Like `signal_strength` and `connection_source`, it stays available while the thermostat does not — those three are what you read when everything else is `unavailable`.
 - `binary_sensor.*_clean_filter` — filter alert (device_class: problem)
 - `button.*_reset_filter` — reset filter timer
+- `button.*_reconnect` — drop and re-establish the Bluetooth connection (diagnostic)
 - `number.*_eye_brightness` — display LED brightness 0–19
 
 ### Ventilation units (VAM / HRV)
@@ -70,14 +74,10 @@ The BRC1H requires an **authenticated (MITM) pairing** — it silently ignores e
 The **stock bluetooth-proxy firmware cannot pair with the BRC1H** (it runs `io_capability: none` and nothing answers the numeric-comparison confirmation). Add this to the proxy's YAML and reflash:
 
 ```yaml
-esp32:
-  framework:
-    type: esp-idf   # sdkconfig_options requires the esp-idf framework
-    sdkconfig_options:
-      CONFIG_BT_BLE_SMP_ENABLE: y
-      CONFIG_BLE_SM_SC: y
-      CONFIG_BLE_SM_LEGACY: y
-
+# io_capability is the only required change: the Bluedroid stack already
+# ships with SMP enabled and persists bonds to NVS by default
+# (CONFIG_BT_BLE_SMP_ENABLE and CONFIG_BT_BLE_SMP_BOND_NVS_FLASH are
+# both default y).
 esp32_ble:
   io_capability: display_yes_no
 
@@ -97,6 +97,18 @@ ble_client:
 Then add the integration: on the first connection the thermostat shows a pairing prompt on its display — **accept it within a few seconds**. Notes:
 - The bond is stored **per proxy**: if several proxies can reach the thermostat, each one triggers its own (one-time) pairing prompt, and each needs the YAML above.
 - If pairing loops (prompt appears, then fails, then re-appears), un-pair on the thermostat (Bluetooth menu → forget) and retry.
+
+##### When a thermostat stops connecting
+
+A thermostat that has been added always loads, even when it cannot be reached: its entities go `unavailable` and Home Assistant keeps retrying in the background, rather than the device disappearing from the UI. Read `sensor.*_connection_status` first — it stays available and says which problem you have. Then, in order of effort:
+
+1. **`not_advertising`** — nothing to re-pair: the thermostat is off, out of range, or its proxy is down.
+2. **`pairing_slow`** — the handshake keeps timing out. Often a congested proxy; Home Assistant slows its attempts to one every 15 minutes and recovers on its own. Reloading the proxy's config entry frees stale connection slots and frequently fixes it.
+3. **`needs_pairing`** — a proxy explicitly refused the bond, which only a human at the thermostat can fix. Home Assistant raises a repair with a **Fix** button that walks you through it (stand at the thermostat, submit, accept the prompt on its screen). The device's **Reconnect** button does the same thing from the dashboard; the repair also works when the device has no entities at all.
+
+Remember the bond is per proxy: re-pairing restores one path, and another proxy may still need its own prompt.
+
+📘 **Reference proxy setup**: for the complete, annotated configuration — including a pairing responder per thermostat that pushes the 6-digit pairing code to Home Assistant as a notification (so you know *which* thermostat is pairing through *which* proxy), the passive-proxy alternative, and a troubleshooting table for multi-proxy homes — see **[docs/esphome-proxy.md](docs/esphome-proxy.md)**.
 
 #### Via the HA host's own adapter
 
@@ -128,10 +140,13 @@ external_components:
   - source:
       type: git
       url: https://github.com/dasimon135/daikin_madoka
-      ref: v2.2.0
+      ref: v3.8.0
       path: esphome/components
     components: [madoka]
 
+# The BRC1H only accepts an authenticated (MITM) link, established through a
+# numeric comparison. Both lines below are required — see the note after this
+# config for what happens if either is missing.
 esp32_ble:
   io_capability: display_yes_no
 
@@ -144,6 +159,13 @@ esp32_ble_tracker:
 ble_client:
   - mac_address: "AA:BB:CC:DD:EE:FF"
     id: my_madoka
+    # Answers the thermostat's numeric-comparison request. Without this the
+    # pairing starts, nothing confirms it, and the link fails.
+    on_numeric_comparison_request:
+      then:
+        - ble_client.numeric_comparison_reply:
+            id: my_madoka
+            accept: true
     on_disconnect:
       then:
         - delay: 10s
@@ -155,6 +177,28 @@ climate:
     ble_client_id: my_madoka
     update_interval: 15s
 ```
+
+> ### Pairing: why both lines matter
+>
+> The BRC1H pairs by **numeric comparison** — both sides show a 6-digit code
+> and each confirms it matches. It silently ignores every command, and even
+> notification subscriptions, on an unauthenticated link.
+>
+> - **`io_capability: display_yes_no`** lets the ESP32 take part in that
+>   exchange at all. The default (`none`) cannot, and `keyboard` offers
+>   passkey *entry* — a different pairing model the thermostat never asks for.
+> - **`on_numeric_comparison_request`** answers it. Without the responder the
+>   pairing starts, the confirmation is never given, and the connection ends
+>   as `AuthenticationCanceled` — often without any prompt appearing on the
+>   thermostat screen.
+>
+> On the first connection the thermostat shows the pairing prompt: accept it
+> within a few seconds. The bond is stored on the ESP32 and survives reboots.
+>
+> **If pairing already failed several times**, the BRC1H's Bluetooth stack
+> stays jammed and will refuse even a correct configuration. On the
+> thermostat: Bluetooth menu → forget the pairing, then toggle Bluetooth off
+> and on again before retrying.
 
 ### Optional entities
 
@@ -172,6 +216,37 @@ Add any of these under your `climate: - platform: madoka` block:
     reset_filter:
       name: "Reset Filter"
 ```
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `dual_setpoint` | `false` | Advertise two setpoints (heating/cooling range) instead of one. |
+
+The BRC1H can work with a single setpoint or with a heating/cooling **range**.
+The HA integration (Option 1) switches between the two automatically, because
+Home Assistant lets an entity change its supported features at runtime. ESPHome
+cannot: climate traits are sent once, when the ESP32 lists its entities, so the
+choice has to be made at build time.
+
+Leave `dual_setpoint` unset (single setpoint) unless range mode is enabled on
+the thermostat itself:
+
+```yaml
+climate:
+  - platform: madoka
+    name: "Living Room"
+    ble_client_id: my_madoka
+    dual_setpoint: true    # only if range mode is enabled on the BRC1H
+```
+
+In single mode the component writes the setpoint register matching the active
+mode (heating in `heat`, cooling otherwise) and leaves the other one as the
+thermostat last reported it — the same rule the HA integration follows.
+
+> **Behaviour change**: the ESP32 entity used to advertise two setpoints
+> unconditionally. After updating the external component, it exposes a single
+> setpoint unless you add `dual_setpoint: true`.
 
 ### Entities exposed
 
@@ -249,6 +324,12 @@ See [CHANGELOG.md](CHANGELOG.md) for available versions.
 
 ### Madoka Card (bundled)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/madoka-card-dark.png">
+  <img src="images/madoka-card.png" width="820"
+       alt="Madoka Card: the full dial layout next to a stack of tile rows, the last one offline showing its Reconnect button">
+</picture>
+
 A dial-style card that mirrors the physical BRC1H — a glowing halo that follows
 the mode, a setpoint arc, fan segments, an eye-brightness slider, a 12 h
 temperature sparkline and filter/signal chips. It ships **inside the
@@ -261,6 +342,7 @@ entity: climate.my_madoka
 # layout: full         # full | compact | tile  (default: full)
 # compact: true        # alias for layout: compact
 # name: "Bedroom"      # override the title
+# reconnect: auto      # auto | always | never  (default: auto)
 ```
 
 Three layouts: **full** (the dial with fan/brightness/graph), **compact**
@@ -268,9 +350,16 @@ Three layouts: **full** (the dial with fan/brightness/graph), **compact**
 mode-colored status dot + name + current→target + `−`/`+`) that lines up with
 Home Assistant's tile cards in a dense grid.
 
-The related entities (outdoor temperature, eye brightness, filter, signal) are
-discovered automatically from the same device — you only need the `climate.*`
-entity. It follows your Home Assistant theme and language (mode names use HA's
+**Reconnect on the spot**: when a thermostat drops off the air, the card
+surfaces its **Reconnect** button right where you noticed the problem — as a
+banner in the full/compact layouts, and in the tile layout in place of the
+`−`/`+` pair (which is inert while the device is unreachable). It disappears
+as soon as the link is back. Set `reconnect: always` to keep it visible at all
+times, or `reconnect: never` to hide it.
+
+The related entities (outdoor temperature, eye brightness, filter, signal,
+reconnect button) are discovered automatically from the same device — you only
+need the `climate.*` entity. It follows your Home Assistant theme and language (mode names use HA's
 own climate translations). The signal chip appears once you enable the
 disabled-by-default `sensor.*_signal_strength`.
 

@@ -110,6 +110,7 @@ climate:
     name: "Madoka salon"
     ble_client_id: madoka_salon
     update_interval: 15s
+    # dual_setpoint: true   # a activer seulement si le mode plage est actif
     outdoor_temperature:
       name: "Madoka salon Temp. Exterieure"
     clean_filter:
@@ -135,6 +136,39 @@ climate:
     reset_filter:
       name: "Madoka parents Reset Filtre"
 ```
+
+## Consigne unique ou double (`dual_setpoint`)
+
+Le BRC1H peut fonctionner avec une seule consigne ou avec une **plage**
+chauffage/refroidissement (mode « range » activé sur le thermostat).
+
+| Option | Defaut | Description |
+|---|---|---|
+| `dual_setpoint` | `false` | Expose deux consignes (plage chaud/froid) au lieu d'une seule. |
+
+```yaml
+climate:
+  - platform: madoka
+    name: "Madoka salon"
+    ble_client_id: madoka_salon
+    dual_setpoint: true   # uniquement si le mode plage est actif sur le BRC1H
+```
+
+**Pourquoi une option YAML et pas un choix automatique ?** L'integration Home
+Assistant (option 1 du README principal) bascule seule entre consigne simple et
+plage, parce que HA autorise une entite a changer ses `supported_features` a
+l'execution. ESPHome ne le permet pas : les *traits* climate sont annonces une
+seule fois, au moment ou l'ESP32 declare ses entites a l'API. Le choix doit donc
+etre fait a la compilation. La parite avec l'integration native est donc au
+niveau de la configuration, pas dynamique.
+
+En mode simple, le composant ecrit le registre de consigne correspondant au mode
+actif (chauffage en `heat`, refroidissement sinon) et renvoie l'autre registre a
+sa derniere valeur lue sur le thermostat — meme regle que l'integration native.
+
+> **Changement de comportement** : avant cette version, l'entite ESP32 annoncait
+> toujours deux consignes. Apres mise a jour du composant externe, elle n'en
+> expose plus qu'une, sauf si vous ajoutez `dual_setpoint: true`.
 
 ## Entites additionnelles du composant madoka
 

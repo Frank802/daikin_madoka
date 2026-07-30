@@ -1,6 +1,7 @@
 #include "madoka.h"
 
 #include "esphome/core/log.h"
+#include <cinttypes>
 #include <utility>
 
 #ifdef USE_ESP32
@@ -102,13 +103,41 @@ void Madoka::control(const ClimateCall &call) {
     }
     this->query_(CMD_SET_SETTING_STATUS, std::vector<uint8_t>{0x20, 0x01, (uint8_t) status_out}, 200);
   }
-  if (call.get_target_temperature_low().has_value() && call.get_target_temperature_high().has_value()) {
+  if (this->dual_setpoint_ && call.get_target_temperature_low().has_value() &&
+      call.get_target_temperature_high().has_value()) {
     uint16_t target_low = *call.get_target_temperature_low() * 128;
     uint16_t target_high = *call.get_target_temperature_high() * 128;
     this->query_(CMD_SET_SETPOINT,
                  std::vector<uint8_t>{0x20, 0x02, (uint8_t) ((target_high >> 8) & 0xFF), (uint8_t) (target_high & 0xFF),
                                       0x21, 0x02, (uint8_t) ((target_low >> 8) & 0xFF), (uint8_t) (target_low & 0xFF)},
                  400);
+  }
+  if (!this->dual_setpoint_ && call.get_target_temperature().has_value()) {
+    float target = *call.get_target_temperature();
+    // The setpoint frame always carries both registers (0x20 cooling,
+    // 0x21 heating): see the dual branch above and CMD_GET_SETPOINT in
+    // parse_cb_. A single-setpoint write therefore has to fill both slots:
+    // the register(s) the current mode actually uses get the new value, the
+    // other one is echoed back from the last poll so it is left untouched.
+    // Same rule as the native integration's async_set_temperature().
+    ClimateMode mode = this->mode;
+    if (call.get_mode().has_value()) {
+      mode = *call.get_mode();
+    }
+    float cooling = target;
+    float heating = target;
+    if (mode == climate::CLIMATE_MODE_HEAT) {
+      cooling = std::isnan(this->cooling_setpoint_) ? target : this->cooling_setpoint_;
+    } else if (mode == climate::CLIMATE_MODE_COOL) {
+      heating = std::isnan(this->heating_setpoint_) ? target : this->heating_setpoint_;
+    }
+    uint16_t target_cooling = cooling * 128;
+    uint16_t target_heating = heating * 128;
+    this->query_(
+        CMD_SET_SETPOINT,
+        std::vector<uint8_t>{0x20, 0x02, (uint8_t) ((target_cooling >> 8) & 0xFF), (uint8_t) (target_cooling & 0xFF),
+                             0x21, 0x02, (uint8_t) ((target_heating >> 8) & 0xFF), (uint8_t) (target_heating & 0xFF)},
+        400);
   }
   if (call.get_fan_mode().has_value()) {
     uint8_t fan_mode = call.get_fan_mode().value();
@@ -145,7 +174,10 @@ void Madoka::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_para
       break;
     case ESP_GAP_BLE_NC_REQ_EVT:
       esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
-      ESP_LOGI(TAG, "ESP_GAP_BLE_NC_REQ_EVT, the passkey Notify number:%d", param->ble_security.key_notif.passkey);
+      // passkey is uint32_t; %d is a -Wformat error waiting to happen on a
+      // 32-bit target where uint32_t is `long unsigned int`.
+      ESP_LOGI(TAG, "ESP_GAP_BLE_NC_REQ_EVT, the passkey Notify number:%" PRIu32,
+               param->ble_security.key_notif.passkey);
       break;
     case ESP_GAP_BLE_AUTH_CMPL_EVT: {
       if (!param->ble_security.auth_cmpl.success) {
@@ -412,12 +444,12 @@ void Madoka::parse_cb_(std::vector<uint8_t> msg) {
         switch (argument_id) {
           case 0x20: {
             std::vector<uint8_t> val(msg.begin() + i, msg.begin() + i + len);
-            this->target_temperature_high = (float) (val[0] << 8 | val[1]) / 128;
+            this->cooling_setpoint_ = (float) (val[0] << 8 | val[1]) / 128;
             break;
           }
           case 0x21: {
             std::vector<uint8_t> val(msg.begin() + i, msg.begin() + i + len);
-            this->target_temperature_low = (float) (val[0] << 8 | val[1]) / 128;
+            this->heating_setpoint_ = (float) (val[0] << 8 | val[1]) / 128;
             break;
           }
         }
@@ -520,7 +552,29 @@ void Madoka::parse_cb_(std::vector<uint8_t> msg) {
       break;
   }
 
+  this->apply_setpoints_();
   this->publish_state();
+}
+
+void Madoka::apply_setpoints_() {
+  // Keep the published state aligned with the advertised traits: ESPHome only
+  // sends target_temperature_low/high for a two-point entity and only
+  // target_temperature for a single-point one, so filling the wrong pair
+  // leaves the frontend without a setpoint at all.
+  // Beware: in climate.h target_temperature is a *union* with the
+  // low/high pair (target_temperature aliases target_temperature_low), which
+  // is why the values read from the device are cached in our own members and
+  // only one of the two shapes is written here.
+  if (this->dual_setpoint_) {
+    this->target_temperature_high = this->cooling_setpoint_;
+    this->target_temperature_low = this->heating_setpoint_;
+    return;
+  }
+  // Single setpoint: report the register the active mode drives. Heating uses
+  // 0x21, everything else (cool, dry, fan, auto and off) uses 0x20, the same
+  // rule the native integration applies in its target_temperature property.
+  this->target_temperature =
+      this->mode == climate::CLIMATE_MODE_HEAT ? this->heating_setpoint_ : this->cooling_setpoint_;
 }
 
 }  // namespace madoka

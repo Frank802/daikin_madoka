@@ -3,7 +3,7 @@
  * Ships with the daikin_madoka integration (auto-registered, no separate install).
  * Vanilla custom element: no external dependencies, works across HA versions.
  */
-const MADOKA_CARD_VERSION = "0.6.1";
+const MADOKA_CARD_VERSION = "0.7.1";
 const SETPOINT_MODES = ["cool", "heat", "auto"]; // modes where a target is meaningful
 
 const MODES = {
@@ -20,13 +20,16 @@ const MODE_ORDER = ["cool", "heat", "auto", "fan_only", "dry", "off"];
 // (hass.localize) so they always match the user's HA language; these cover
 // only the labels HA does not provide. English is the fallback.
 const CARD_STRINGS = {
-  en: { to: "to", standby: "standby", display: "Display", fan: "Fan", fanMode: "Fan", filterOk: "OK", filterClean: "Clean" },
-  fr: { to: "vers", standby: "en veille", display: "Voyant", fan: "Ventilation", fanMode: "Ventilation", filterOk: "OK", filterClean: "Nettoyer" },
-  es: { to: "a", standby: "en espera", display: "Pantalla", fan: "Ventilación", fanMode: "Ventilación", filterOk: "OK", filterClean: "Limpiar" },
-  de: { to: "auf", standby: "Standby", display: "Anzeige", fan: "Lüftung", fanMode: "Lüftung", filterOk: "OK", filterClean: "Reinigen" },
-  it: { to: "a", standby: "in pausa", display: "Display", fan: "Ventola", fanMode: "Ventola", filterOk: "OK", filterClean: "Pulire" },
-  nl: { to: "naar", standby: "stand-by", display: "Display", fan: "Ventilatie", fanMode: "Ventilatie", filterOk: "OK", filterClean: "Reinigen" },
+  en: { to: "to", standby: "standby", display: "Display", fan: "Fan", fanMode: "Fan", filterOk: "OK", filterClean: "Clean", reconnect: "Reconnect", reconnecting: "Reconnecting…", reconnectFailed: "Reconnect failed — retry" },
+  fr: { to: "vers", standby: "en veille", display: "Voyant", fan: "Ventilation", fanMode: "Ventilation", filterOk: "OK", filterClean: "Nettoyer", reconnect: "Reconnecter", reconnecting: "Reconnexion…", reconnectFailed: "Échec — réessayer" },
+  es: { to: "a", standby: "en espera", display: "Pantalla", fan: "Ventilación", fanMode: "Ventilación", filterOk: "OK", filterClean: "Limpiar", reconnect: "Reconectar", reconnecting: "Reconectando…", reconnectFailed: "Fallo — reintentar" },
+  de: { to: "auf", standby: "Standby", display: "Anzeige", fan: "Lüftung", fanMode: "Lüftung", filterOk: "OK", filterClean: "Reinigen", reconnect: "Neu verbinden", reconnecting: "Verbinde…", reconnectFailed: "Fehlgeschlagen — erneut" },
+  it: { to: "a", standby: "in pausa", display: "Display", fan: "Ventola", fanMode: "Ventola", filterOk: "OK", filterClean: "Pulire", reconnect: "Riconnetti", reconnecting: "Riconnessione…", reconnectFailed: "Non riuscito — riprova" },
+  nl: { to: "naar", standby: "stand-by", display: "Display", fan: "Ventilatie", fanMode: "Ventilatie", filterOk: "OK", filterClean: "Reinigen", reconnect: "Opnieuw verbinden", reconnecting: "Verbinden…", reconnectFailed: "Mislukt — opnieuw" },
 };
+// How long the reconnect button stays in its "working" state before it can be
+// pressed again — a BLE reconnect through a proxy takes a few seconds.
+const RECONNECT_BUSY_MS = 30000;
 const FAN_SHORT = {
   en: { auto: "Auto", low: "Low", medium: "Mid", high: "High" },
   fr: { auto: "Auto", low: "Bas", medium: "Moy", high: "Haut" },
@@ -55,6 +58,10 @@ class MadokaCard extends HTMLElement {
     this._dialog = null;
     this._dialogCard = null;
     this._dialogKey = null;
+    this._reconAt = 0;
+    this._reconTimer = null;
+    this._reconPending = false;
+    this._reconErr = false;
   }
 
   static getStubConfig(hass) {
@@ -118,6 +125,7 @@ class MadokaCard extends HTMLElement {
       brightness: cfg.brightness_entity || null,
       filter: cfg.filter_entity || null,
       rssi: cfg.rssi_entity || null,
+      reconnect: cfg.reconnect_entity || null,
     };
     const reg = hass.entities || {};
     const devId = reg[cfg.entity] && reg[cfg.entity].device_id;
@@ -133,9 +141,85 @@ class MadokaCard extends HTMLElement {
         if (!out.brightness && domain === "number") out.brightness = eid;
         if (!out.filter && domain === "binary_sensor" && dc === "problem") out.filter = eid;
         if (!out.rssi && domain === "sensor" && dc === "signal_strength") out.rssi = eid;
+        // The device also owns a "reset filter" button, so match on the
+        // registry translation key first; the entity_id is only a fallback
+        // (it survives a rename, the id does not).
+        if (!out.reconnect && domain === "button" &&
+            (reg[eid].translation_key === "reconnect" || /reconnect/.test(eid))) {
+          out.reconnect = eid;
+        }
       }
     }
     return out;
+  }
+
+  /* --------------------------- reconnect action --------------------------- */
+  // `reconnect: auto` (default) surfaces the button only while the thermostat
+  // is unreachable — exactly when it is useful. `always` pins it, `never` hides it.
+  _reconnectMode() {
+    const m = this._config.reconnect;
+    return m === "always" || m === "never" ? m : "auto";
+  }
+
+  // The integration keeps the Reconnect button available on purpose (it is the
+  // remedy for a dead link), so "unavailable" here means the entity is really
+  // gone — disabled in the registry, or its entry not loaded. Pressing it then
+  // does nothing at all, so the button must not be offered. Note "unknown" is
+  // the NORMAL state of a button that has never been pressed: it is usable.
+  _reconnectEntityUsable(ids) {
+    const st = ids.reconnect && this._hass.states[ids.reconnect];
+    return !!st && st.state !== "unavailable";
+  }
+
+  _showReconnect(ids, unavailable) {
+    const mode = this._reconnectMode();
+    if (mode === "never") return false;
+    // A failure must stay on screen even if the entity vanished meanwhile —
+    // that is the message the user needs.
+    if (this._reconErr) return true;
+    if (!this._reconnectEntityUsable(ids)) return false;
+    return mode === "always" || unavailable || this._reconnectBusy() || this._reconPending;
+  }
+
+  _reconnectBusy() {
+    if (!this._reconAt) return false;
+    if (Date.now() - this._reconAt > RECONNECT_BUSY_MS) { this._reconAt = 0; return false; }
+    return true;
+  }
+
+  // Three honest states instead of one optimistic one:
+  //   pending — the service call is in flight (true right now);
+  //   busy    — it was ACCEPTED, so the link really is being re-established;
+  //   error   — it was rejected, and the user is told so.
+  // The busy window used to start before callService and there was no .catch,
+  // so a press that failed (or hit a nonexistent entity) showed a spinner for
+  // 30s, then nothing, plus an unhandled promise rejection in the console.
+  _reconnect(ids) {
+    if (this._reconnectBusy() || this._reconPending) return;
+    if (!this._reconnectEntityUsable(ids)) {
+      this._reconErr = true;
+      this._update();
+      return;
+    }
+    this._reconErr = false;
+    this._reconPending = true;
+    this._update();
+    Promise.resolve(this._hass.callService("button", "press", { entity_id: ids.reconnect }))
+      .then(() => {
+        this._reconPending = false;
+        this._reconAt = Date.now();
+        // The entity may stay unavailable while the link is re-established, so
+        // schedule our own repaint to clear the busy state.
+        if (this._reconTimer) clearTimeout(this._reconTimer);
+        this._reconTimer = setTimeout(() => { this._reconAt = 0; this._update(); }, RECONNECT_BUSY_MS);
+        this._update();
+      })
+      .catch(() => {
+        this._reconPending = false;
+        this._reconAt = 0;
+        this._reconErr = true;
+        this._update();
+      });
   }
 
   /* ---------------------------- rendering ---------------------------- */
@@ -160,6 +244,10 @@ class MadokaCard extends HTMLElement {
     const hvac = st.state; // off / cool / heat / auto / dry / fan_only
     const unavailable = hvac === "unavailable" || hvac === "unknown";
     const on = !unavailable && hvac !== "off";
+    // The link is back: nothing left to report, success or failure.
+    // _reconPending is deliberately untouched - a call in flight is still
+    // in flight, and its own handlers own that flag.
+    if (!unavailable) { this._reconAt = 0; this._reconErr = false; }
     const modeKey = MODES[hvac] ? hvac : "off";
     const M = MODES[modeKey];
     const min = a.min_temp != null ? a.min_temp : MIN_FALLBACK;
@@ -219,6 +307,12 @@ class MadokaCard extends HTMLElement {
 
     // chips: rssi, outdoor, filter
     this._renderChips(ids);
+
+    // reconnect (offline recovery)
+    this._renderReconnect(ids, unavailable);
+
+    // nothing to command while the thermostat is unreachable
+    root.querySelectorAll(".ctl").forEach((b) => { b.disabled = unavailable; });
 
     // brightness slider
     this._renderBrightness(ids);
@@ -282,6 +376,34 @@ class MadokaCard extends HTMLElement {
         mdi("mdi:air-filter") + `${on ? this._t("filterClean") : this._t("filterOk")}</span>`);
     }
     wrap.innerHTML = chips.join("");
+  }
+
+  // busy = the press was accepted; failed = it was not. Never both.
+  _reconVisual() {
+    const busy = this._reconPending || this._reconnectBusy();
+    const failed = !busy && this._reconErr;
+    return {
+      busy,
+      failed,
+      icon: failed ? "mdi:alert-circle-outline"
+        : busy ? "mdi:bluetooth-transfer" : "mdi:bluetooth-connect",
+      label: this._t(failed ? "reconnectFailed" : busy ? "reconnecting" : "reconnect"),
+    };
+  }
+
+  _renderReconnect(ids, unavailable) {
+    const row = this.shadowRoot.getElementById("reconRow");
+    this._reconEntity = ids.reconnect;
+    if (!this._showReconnect(ids, unavailable)) { row.style.display = "none"; return; }
+    row.style.display = "flex";
+    const btn = this.shadowRoot.getElementById("reconBtn");
+    const v = this._reconVisual();
+    // Only the in-flight/accepted states lock the button: after a failure the
+    // user must be able to press it again straight away.
+    btn.disabled = v.busy;
+    btn.classList.toggle("busy", v.busy);
+    btn.classList.toggle("failed", v.failed);
+    btn.innerHTML = mdi(v.icon) + `<span>${v.label}</span>`;
   }
 
   _renderBrightness(ids) {
@@ -387,6 +509,10 @@ class MadokaCard extends HTMLElement {
     root.getElementById("tdot").addEventListener("click", () => this._power());
     root.getElementById("tminus").addEventListener("click", () => this._bump(-1));
     root.getElementById("tplus").addEventListener("click", () => this._bump(1));
+    root.getElementById("trecon").addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._reconnect(this._resolve());
+    });
     // Tapping the name/state opens the full card in a popup (or HA's
     // native more-info dialog when `tile_tap: more-info` is configured).
     const info = root.getElementById("tinfo");
@@ -431,7 +557,13 @@ class MadokaCard extends HTMLElement {
     </style>
     <div class="scrim"><div class="wrap"><button class="x" aria-label="Close">✕</button></div></div>`;
     const card = document.createElement("madoka-card");
-    card.setConfig({ entity: this._config.entity, name: this._config.name, layout: "full" });
+    card.setConfig({
+      entity: this._config.entity,
+      name: this._config.name,
+      layout: "full",
+      reconnect: this._config.reconnect,
+      reconnect_entity: this._config.reconnect_entity,
+    });
     card.hass = this._hass;
     sr.querySelector(".wrap").appendChild(card);
     const close = () => this._closeCardDialog();
@@ -452,7 +584,10 @@ class MadokaCard extends HTMLElement {
     this._dialogKey = null;
   }
 
-  disconnectedCallback() { this._closeCardDialog(); }
+  disconnectedCallback() {
+    if (this._reconTimer) { clearTimeout(this._reconTimer); this._reconTimer = null; }
+    this._closeCardDialog();
+  }
 
   _build() {
     this._built = true;
@@ -462,6 +597,7 @@ class MadokaCard extends HTMLElement {
     root.getElementById("plus").addEventListener("click", () => this._bump(1));
     root.getElementById("minus").addEventListener("click", () => this._bump(-1));
     root.getElementById("power").addEventListener("click", () => this._power());
+    root.getElementById("reconBtn").addEventListener("click", () => this._reconnect(this._resolve()));
     root.getElementById("modes").addEventListener("click", (e) => {
       const b = e.target.closest(".mode-btn"); if (b) this._setMode(b.dataset.mode);
     });
@@ -520,6 +656,7 @@ class MadokaCard extends HTMLElement {
     </button>
     <button class="ctl" id="plus" type="button" aria-label="Raise">+</button>
   </div>
+  <div class="reconrow" id="reconRow"><button class="reconbtn" id="reconBtn" type="button"></button></div>
   <div class="fanrow"><span class="lbl" id="fanLbl">Fan</span><div class="fansel" id="fanSel"></div></div>
   <div class="brightrow" id="brightRow">
     <span class="lbl" id="brightLbl">Display</span>
@@ -543,6 +680,7 @@ class MadokaCard extends HTMLElement {
   <div class="tctl">
     <button class="tbtn" id="tminus" type="button" aria-label="Lower">−</button>
     <button class="tbtn" id="tplus" type="button" aria-label="Raise">+</button>
+    <button class="tbtn recon" id="trecon" type="button"></button>
   </div>
 </div>`;
   }
@@ -553,6 +691,10 @@ class MadokaCard extends HTMLElement {
     const hvac = st.state;
     const unavailable = hvac === "unavailable" || hvac === "unknown";
     const on = !unavailable && hvac !== "off";
+    // The link is back: nothing left to report, success or failure.
+    // _reconPending is deliberately untouched - a call in flight is still
+    // in flight, and its own handlers own that flag.
+    if (!unavailable) { this._reconAt = 0; this._reconErr = false; }
     const M = MODES[MODES[hvac] ? hvac : "off"];
     root.host.style.setProperty("--state", M.color);
     root.host.style.setProperty("--state-2", M.color2);
@@ -583,6 +725,25 @@ class MadokaCard extends HTMLElement {
     const disabled = !on || !meaningful;
     root.getElementById("tminus").disabled = disabled;
     root.getElementById("tplus").disabled = disabled;
+
+    // Offline: the −/+ pair is inert anyway, so give the row over to the
+    // reconnect button instead of showing two dead controls.
+    const ids = this._resolve();
+    const recon = this._showReconnect(ids, unavailable);
+    const tr = root.getElementById("trecon");
+    tr.style.display = recon ? "grid" : "none";
+    if (recon) {
+      const v = this._reconVisual();
+      tr.disabled = v.busy;
+      tr.classList.toggle("busy", v.busy);
+      tr.classList.toggle("failed", v.failed);
+      tr.title = v.label;
+      tr.setAttribute("aria-label", tr.title);
+      tr.innerHTML = mdi(v.icon);
+    }
+    const hideBumps = recon && unavailable;
+    root.getElementById("tminus").style.display = hideBumps ? "none" : "";
+    root.getElementById("tplus").style.display = hideBumps ? "none" : "";
 
     // state used by _bump / _power
     this._min = a.min_temp != null ? a.min_temp : MIN_FALLBACK;
@@ -665,6 +826,22 @@ class MadokaCard extends HTMLElement {
 .ctl:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .ctl.power svg, .ctl.power ha-icon { width:20px; height:20px; --mdc-icon-size:20px; }
 .fanrow, .brightrow { display:flex; align-items:center; gap:10px; }
+/* Reconnect — shown only while the thermostat is unreachable (config: reconnect) */
+.reconrow { display:none; }
+.reconbtn { flex:1; display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  font-size:.8rem; font-weight:650; cursor:pointer; padding:9px 12px; border-radius:10px;
+  color:#fff; border:1px solid transparent; background:linear-gradient(135deg,#f0a33a,#e2703a);
+  box-shadow:0 6px 16px -8px rgba(226,112,58,.9); transition:transform .12s, filter .2s; }
+.reconbtn ha-icon { --mdc-icon-size:17px; width:17px; height:17px; }
+.reconbtn:hover:not(:disabled) { filter:brightness(1.07); }
+.reconbtn:active:not(:disabled) { transform:scale(.98); }
+.reconbtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.reconbtn:disabled { cursor:default; }
+.reconbtn.busy, .tbtn.recon.busy { opacity:.75; animation: reconpulse 1.4s ease-in-out infinite; }
+@keyframes reconpulse { 0%,100%{opacity:.55;} 50%{opacity:1;} }
+/* A press that was REJECTED: never dressed up as progress, and still pressable. */
+.reconbtn.failed, .tbtn.recon.failed { background:linear-gradient(135deg,#e05a52,#b3312a);
+  box-shadow:0 6px 16px -8px rgba(179,49,42,.9); }
 .lbl { font-size:.68rem; text-transform:uppercase; letter-spacing:.12em; font-weight:700; color:var(--ink-soft); min-width:52px; }
 .fansel { display:flex; gap:4px; flex:1; }
 .fanbtn { flex:1; font-size:.72rem; font-weight:600; color:var(--ink-soft); background:transparent;
@@ -707,6 +884,11 @@ class MadokaCard extends HTMLElement {
 .tbtn:hover:not(:disabled) { border-color:var(--accent); background: color-mix(in srgb,var(--accent) 14%,var(--panel)); }
 .tbtn:active:not(:disabled) { transform:scale(.9); }
 .tbtn:disabled { opacity:.4; cursor:default; }
+.tbtn.recon { display:none; place-items:center; color:#fff; border-color:transparent;
+  background:linear-gradient(135deg,#f0a33a,#e2703a); }
+.tbtn.recon ha-icon { --mdc-icon-size:19px; width:19px; height:19px; }
+.tbtn.recon:hover:not(:disabled) { filter:brightness(1.07); background:linear-gradient(135deg,#f0a33a,#e2703a); }
+.tbtn.recon:disabled { opacity:1; }
 .tdot:focus-visible, .tbtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 
 /* Compact variant (config: compact: true) — dial + controls + modes only */
@@ -719,7 +901,7 @@ class MadokaCard extends HTMLElement {
 .card.compact .controls { gap:22px; }
 .card.compact .ctl { width:40px; height:40px; font-size:1.2rem; }
 .card.compact .fanrow, .card.compact .brightrow, .card.compact .graph { display:none !important; }
-@media (prefers-reduced-motion: reduce) { .halo, .fan.auto i.on { animation:none; } * { transition-duration:60ms !important; } }
+@media (prefers-reduced-motion: reduce) { .halo, .fan.auto i.on, .reconbtn.busy, .tbtn.recon.busy { animation:none; } * { transition-duration:60ms !important; } }
 `;
   }
 }

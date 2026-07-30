@@ -11,15 +11,21 @@
     "flow_title": "{name}",
     "abort": {
       "already_configured": "Ce thermostat est déjà configuré",
-      "already_in_progress": "Une configuration est déjà en cours"
+      "already_in_progress": "Une configuration est déjà en cours",
+      "weak_signal": "Signal trop faible — l'appareil est probablement en dehors de votre domicile.",
+      "reconfigure_successful": "Reconfiguration réussie",
+      "reconfigure_legacy": "Cette entrée héritée couvre plusieurs thermostats et ne peut pas être reconfigurée. Supprimez-la et ajoutez chaque thermostat individuellement.",
+      "reauth_successful": "Réappairage réussi"
     },
     "error": {
-      "not_a_mac": "Format d'adresse MAC incorrect (ex. AA:BB:CC:DD:EE:FF)"
+      "not_a_mac": "Format d'adresse MAC incorrect (ex. AA:BB:CC:DD:EE:FF)",
+      "cannot_connect": "Impossible de se connecter au thermostat. Vérifiez qu'il est alimenté et à portée Bluetooth d'un proxy, puis réessayez.",
+      "pairing_failed": "Le thermostat a refusé la connexion : une invite d'appairage attend probablement sur son écran. Restez près du thermostat, confirmez l'invite, puis réessayez."
     },
     "step": {
       "user": {
         "title": "Configurer Daikin Madoka",
-        "description": "Choisissez un thermostat BRC1H détecté ou saisissez son adresse MAC Bluetooth. Relancez ce flux pour ajouter d'autres thermostats.\n\nL'appareil doit être appairé avec l'hôte Home Assistant (ou accessible via un proxy Bluetooth ESPHome). Consultez la documentation pour l'appairage.",
+        "description": "Choisissez un thermostat BRC1H détecté ou saisissez son adresse MAC Bluetooth. Relancez ce flux pour ajouter d'autres thermostats.\n\nLa connexion est testée avant l'ajout de l'appareil. Restez près du thermostat : une invite d'appairage peut apparaître sur son écran et devoir être confirmée. Consultez la documentation pour l'appairage.",
         "data": {
           "address": "Thermostat BRC1H",
           "friendly_name": "Nom convivial (optionnel, ex. « Salon »)",
@@ -28,10 +34,22 @@
       },
       "bluetooth_confirm": {
         "title": "Thermostat Daikin Madoka détecté",
-        "description": "Ajouter {name} à Home Assistant ?",
+        "description": "Ajouter {name} à Home Assistant ?\n\nLa connexion est d'abord testée. Restez près du thermostat : une invite d'appairage peut apparaître sur son écran et devoir être confirmée.",
         "data": {
           "friendly_name": "Nom convivial (optionnel, ex. « Salon »)",
           "device_type": "Type d'appareil"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Réappairer {name}",
+        "description": "{name} a refusé le lien Bluetooth : Home Assistant ne peut plus communiquer avec lui. Le réappairage exige votre présence devant le thermostat.\n\nPlacez-vous devant {name}, appuyez sur Valider, puis acceptez l'invite d'appairage qui apparaît sur son écran (comparez le code à 6 chiffres). Vous disposez d'environ une minute. Un appairage appartient à un seul proxy Bluetooth : il faudra peut-être recommencer plus tard pour un autre proxy."
+      },
+      "reconfigure": {
+        "title": "Reconfigurer Daikin Madoka",
+        "description": "Modifiez l'adresse MAC Bluetooth du thermostat ou son nom convivial. Un changement d'adresse MAC est d'abord validé par un test de connexion — restez près du thermostat : une invite d'appairage peut apparaître sur son écran et devoir être confirmée.",
+        "data": {
+          "address": "Adresse MAC Bluetooth",
+          "friendly_name": "Nom convivial (optionnel, ex. « Salon »)"
         }
       }
     }
@@ -64,6 +82,19 @@
       },
       "operating_time": {
         "name": "Temps de fonctionnement"
+      },
+      "connection_source": {
+        "name": "Source de connexion"
+      },
+      "connection_status": {
+        "name": "État de la connexion",
+        "state": {
+          "connected": "Connecté",
+          "retrying": "Nouvelle tentative",
+          "pairing_slow": "Appairage qui n'aboutit pas",
+          "needs_pairing": "Appairage requis",
+          "not_advertising": "Vu par aucun proxy"
+        }
       }
     },
     "binary_sensor": {
@@ -89,6 +120,14 @@
     "device_unreachable": {
       "title": "{device} est injoignable",
       "description": "Home Assistant n'arrive plus à joindre le thermostat {device} depuis un moment. Vérifiez qu'il est alimenté et à portée Bluetooth. Si vous passez par un proxy Bluetooth ESPHome, le proxy doit être flashé avec le support d'appairage et le thermostat appairé — voir la documentation. Vous pouvez aussi essayer le bouton Reconnecter de l'appareil."
+    },
+    "pairing_required": {
+      "title": "{device} refuse la connexion Bluetooth",
+      "description": "Tous les chemins Bluetooth vers {device} ont été refusés car le proxy n'est pas appairé avec lui (essayé via : {proxies}). Les tentatives de connexion automatiques sont désormais suspendues pour ne pas inonder le thermostat d'invites d'appairage impossibles à confirmer. Placez-vous devant le thermostat, appuyez sur le bouton Reconnecter de l'appareil dans Home Assistant, puis confirmez l'invite d'appairage sur son écran — nécessaire une fois par proxy. Consultez la documentation d'appairage pour plus de détails."
+    },
+    "pairing_slow": {
+      "title": "{device} ne termine pas son appairage Bluetooth",
+      "description": "Les connexions vers {device} expirent systématiquement pendant l'établissement de l'appairage Bluetooth (essayé via : {proxies}). Cela ne prouve pas que le thermostat a refusé quoi que ce soit — un proxy surchargé produit le même symptôme — aussi Home Assistant continue d'essayer, mais beaucoup plus rarement, pour ne pas inonder le thermostat d'invites d'appairage. S'il ne se rétablit pas de lui-même : placez-vous devant le thermostat, appuyez sur le bouton Reconnecter de l'appareil dans Home Assistant, puis confirmez l'invite d'appairage sur son écran. Voir la documentation d'appairage pour les détails."
     }
   }
 }
