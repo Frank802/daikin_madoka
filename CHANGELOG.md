@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.9.0 - July 2026
+
+### Daikin VAM (ventilation) support
+
+Builds on the v3.8.x connection-layer rewrite (requires **pymadoka-ng 0.3.10**, installed automatically) and adds ventilation-only appliances.
+
+- **New: ventilation units (VAM / HRV).** Both integrations now support Daikin VAM units — ventilation-only indoor units driven by the same BRC1H controller over the same BLE protocol (operation mode 5 = VENTILATION, no temperature setpoint).
+  - **HA integration**: the config flow now asks for the **appliance type** (*thermostat* or *ventilation*). A ventilation device exposes an **Off / Fan only** climate entity with fan-speed control and indoor/outdoor temperature — no target temperature.
+  - **ESPHome**: new dedicated **`madoka_vam`** platform (Off / Fan only, fan LOW/MEDIUM/HIGH/AUTO, current temperature, optional `outdoor_temperature` and `firmware_version`).
+- **Reverse-engineering tooling** to map VAM-specific features later: a `dump_raw` option on `madoka_vam` (hex-logs every BLE frame and any unhandled function ID), a public `send_raw_command()` probe callable from a lambda, and a capture guide at [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md).
+
 ## v3.8.1 - July 2026
 
 Requires **pymadoka-ng 0.3.10** (installed automatically). The library now states outright *why* pairing failed instead of leaving it to be inferred from a side effect, which is what v3.8.0 already reads when the attribute is there — this release simply makes it the version you actually run.

@@ -37,7 +37,7 @@ Copy `custom_components/daikin_madoka/` into your HA `custom_components/` direct
 
 ### Setup
 
-If a thermostat is advertising nearby (directly or via a Bluetooth proxy), Home Assistant will discover it and offer to add it — just confirm and optionally give it a name. Otherwise go to **Settings → Devices & Services → Add Integration → Daikin Madoka** and pick it from the dropdown (or type its MAC address).
+If a thermostat is advertising nearby (directly or via a Bluetooth proxy), Home Assistant will discover it and offer to add it — just confirm, optionally give it a name, and pick the **appliance type** (*thermostat* for a regular heat/cool unit, or *ventilation* for a VAM/HRV). Otherwise go to **Settings → Devices & Services → Add Integration → Daikin Madoka** and pick it from the dropdown (or type its MAC address).
 
 The poll interval (default 60 s) can be changed from the integration's **Configure** dialog.
 
@@ -55,6 +55,15 @@ Each thermostat creates:
 - `button.*_reset_filter` — reset filter timer
 - `button.*_reconnect` — drop and re-establish the Bluetooth connection (diagnostic)
 - `number.*_eye_brightness` — display LED brightness 0–19
+
+### Ventilation units (VAM / HRV)
+
+If you set the appliance type to **ventilation**, the `climate.*` entity adapts
+to a VAM (Ventilation Air Management / heat-recovery unit): it exposes **Off** and
+**Fan only** modes and a **fan speed** (no temperature setpoint, since a VAM only
+ventilates). Indoor/outdoor temperature sensors still work. Advanced
+VAM-specific features (bypass/auto ventilation, airflow presets, filter, air
+quality) are not mapped yet — see [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md) to help capture them.
 
 ### Requirements
 
@@ -248,6 +257,50 @@ Each thermostat creates:
 - `text_sensor.*_firmware_version` — firmware version (optional)
 - `number.*_eye_brightness` — display LED brightness 0–19 (optional)
 - `button.*_reset_filter` — reset filter timer (optional)
+
+### Ventilation units (VAM / HRV) — `madoka_vam` platform
+
+For a Daikin VAM (ventilation-only unit), use the dedicated **`madoka_vam`**
+platform instead of `madoka`. It exposes **Off** / **Fan only** modes, a fan
+speed (LOW/MEDIUM/HIGH/AUTO) and the current temperature — a VAM has no
+temperature setpoint.
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/dasimon135/daikin_madoka
+      ref: v3.2.0        # replace with latest tag
+      path: esphome/components
+    components: [madoka_vam]
+
+esp32_ble:
+  io_capability: display_yes_no
+
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: "AA:BB:CC:DD:EE:FF"
+    id: vam_client
+    on_disconnect:
+      then:
+        - delay: 10s
+        - ble_client.connect: vam_client
+
+climate:
+  - platform: madoka_vam
+    name: "Ventilation"
+    ble_client_id: vam_client
+    update_interval: 15s
+    outdoor_temperature:
+      name: "Outdoor Temperature"
+    firmware_version:
+      name: "Firmware"
+    dump_raw: false        # set true to hex-log BLE frames (reverse engineering)
+```
+
+Set `dump_raw: true` to hex-log every BLE frame and any unhandled function ID —
+useful for mapping VAM-specific features. See [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md).
 
 ### Pinning versions
 
