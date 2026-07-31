@@ -189,7 +189,7 @@ fait que ventiler : mode d'opération `5` (VENTILATION), sans consigne de
 température.
 
 Entités exposées : modes **Off** / **Fan only**, vitesse de ventilation
-(LOW/MEDIUM/HIGH/AUTO), température courante. Options : `outdoor_temperature`
+(LOW/HIGH), température courante. Options : `outdoor_temperature`
 (capteur), `firmware_version` (text sensor), `dump_raw` (booléen).
 
 ```yaml

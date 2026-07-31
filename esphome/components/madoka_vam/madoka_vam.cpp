@@ -1,6 +1,7 @@
 #include "madoka_vam.h"
 
 #include "esphome/core/log.h"
+#include <cinttypes>
 #include <utility>
 
 #ifdef USE_ESP32
@@ -16,14 +17,26 @@ static const uint16_t CMD_GET_SETTING_STATUS = 0x0020;
 static const uint16_t CMD_SET_SETTING_STATUS = 0x4020;
 static const uint16_t CMD_GET_OPERATION_MODE = 0x0030;
 static const uint16_t CMD_SET_OPERATION_MODE = 0x4030;
-static const uint16_t CMD_GET_FAN_SPEED = 0x0050;
-static const uint16_t CMD_SET_FAN_SPEED = 0x4050;
+// The VAM carries its airflow on the ventilation function, not on the regular
+// fan speed function (0x0050): 0x0050 answers, but every argument comes back
+// with length 0 and none of them ever change when the unit is driven from its
+// own wall controller.
+static const uint16_t CMD_GET_VENTILATION = 0x0031;
+static const uint16_t CMD_SET_VENTILATION = 0x4031;
 static const uint16_t CMD_GET_SENSOR_INFORMATION = 0x0110;
 static const uint16_t CMD_GET_CLEAN_FILTER = 0x0100;
 static const uint16_t CMD_GET_VERSION = 0x0130;
 static const uint16_t CMD_GET_EYE_BRIGHTNESS = 0x0302;
 static const uint16_t CMD_RESET_FILTER = 0x4220;
 static const uint16_t CMD_SET_EYE_BRIGHTNESS = 0x4302;
+
+// Argument of CMD_GET_VENTILATION / CMD_SET_VENTILATION holding the airflow.
+static const uint8_t ARG_VENTILATION_FAN_SPEED = 0x21;
+// The VAM reuses the Madoka fan speed encoding. Values the unit does not
+// support are ignored silently, so a two-speed VAM simply stays where it was
+// when asked for 0x03.
+static const uint8_t FAN_SPEED_LOW = 0x01;
+static const uint8_t FAN_SPEED_HIGH = 0x05;
 
 void MadokaVam::dump_config() { LOG_CLIMATE(TAG, "Daikin Madoka VAM Climate Controller", this); }
 
@@ -86,20 +99,20 @@ void MadokaVam::control(const ClimateCall &call) {
   }
   if (call.get_fan_mode().has_value()) {
     uint8_t fan_mode = call.get_fan_mode().value();
-    uint8_t fan_mode_out = 255;
+    uint8_t fan_speed_out = 255;
     switch (fan_mode) {
       case climate::CLIMATE_FAN_LOW:
-        fan_mode_out = 1;
+        fan_speed_out = FAN_SPEED_LOW;
+        break;
       case climate::CLIMATE_FAN_HIGH:
-        fan_mode_out = 5;
+        fan_speed_out = FAN_SPEED_HIGH;
         break;
       default:
         ESP_LOGW(TAG, "Unsupported fan mode: %d", fan_mode);
         break;
     }
-    if (fan_mode_out != 255) {
-      this->query_(CMD_SET_FAN_SPEED,
-                   std::vector<uint8_t>{0x20, 0x01, (uint8_t) fan_mode_out, 0x21, 0x01, (uint8_t) fan_mode_out}, 200);
+    if (fan_speed_out != 255) {
+      this->query_(CMD_SET_VENTILATION, std::vector<uint8_t>{ARG_VENTILATION_FAN_SPEED, 0x01, fan_speed_out}, 200);
     }
   }
   this->should_update_ = true;
@@ -112,7 +125,8 @@ void MadokaVam::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
       break;
     case ESP_GAP_BLE_NC_REQ_EVT:
       esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
-      ESP_LOGI(TAG, "ESP_GAP_BLE_NC_REQ_EVT, the passkey Notify number:%d", param->ble_security.key_notif.passkey);
+      ESP_LOGI(TAG, "ESP_GAP_BLE_NC_REQ_EVT, the passkey Notify number:%" PRIu32,
+               param->ble_security.key_notif.passkey);
       break;
     case ESP_GAP_BLE_AUTH_CMPL_EVT: {
       if (!param->ble_security.auth_cmpl.success) {
@@ -191,7 +205,7 @@ void MadokaVam::update() {
 
   this->query_(CMD_GET_SETTING_STATUS, std::vector<uint8_t>{0x00, 0x00}, 50);
   this->query_(CMD_GET_OPERATION_MODE, std::vector<uint8_t>{0x00, 0x00}, 50);
-  this->query_(CMD_GET_FAN_SPEED, std::vector<uint8_t>{0x00, 0x00}, 50);
+  this->query_(CMD_GET_VENTILATION, std::vector<uint8_t>{0x00, 0x00}, 50);
   this->query_(CMD_GET_SENSOR_INFORMATION, std::vector<uint8_t>{0x00, 0x00}, 50);
   this->query_(CMD_GET_CLEAN_FILTER, std::vector<uint8_t>{0x00, 0x00}, 50);
   this->query_(CMD_GET_VERSION, std::vector<uint8_t>{0x00, 0x00}, 50);
@@ -314,6 +328,10 @@ void MadokaVam::query_(uint16_t cmd, std::vector<uint8_t> args, int t_d) {
 }
 
 void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
+  if (msg.size() < 4) {
+    ESP_LOGW(TAG, "Discarding a frame that is too short to carry a function id");
+    return;
+  }
   uint16_t function_id = msg[2] << 8 | msg[3];
   uint8_t i = 4;
   uint8_t message_size = msg.size();
@@ -323,9 +341,8 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
       while (i < message_size) {
         uint8_t argument_id = msg[i++];
         uint8_t len = msg[i++];
-        if (argument_id == 0x20) {
-          std::vector<uint8_t> val(msg.begin() + i, msg.begin() + i + len);
-          this->cur_status_.status = val[0];
+        if (argument_id == 0x20 && len >= 1) {
+          this->cur_status_.status = msg[i];
         }
         i += len;
       }
@@ -334,9 +351,8 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
       while (i < message_size) {
         uint8_t argument_id = msg[i++];
         uint8_t len = msg[i++];
-        if (argument_id == 0x20) {
-          std::vector<uint8_t> val(msg.begin() + i, msg.begin() + i + len);
-          this->cur_status_.mode = val[0];
+        if (argument_id == 0x20 && len >= 1) {
+          this->cur_status_.mode = msg[i];
         }
         i += len;
       }
@@ -358,31 +374,24 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
         this->mode = climate::CLIMATE_MODE_OFF;
       }
       break;
-    case CMD_GET_FAN_SPEED: {
-      uint8_t fan_mode = 255;
+    case CMD_GET_VENTILATION: {
       while (i < message_size) {
         uint8_t argument_id = msg[i++];
         uint8_t len = msg[i++];
-        if (this->cur_status_.mode == 1) {
-        } else if ((argument_id == 0x21 && len == 1 && this->cur_status_.mode == 5) ||
-                   (argument_id == 0x20 && len == 1 && this->cur_status_.mode != 5)) {
-          fan_mode = msg[i];
+        if (argument_id == ARG_VENTILATION_FAN_SPEED && len >= 1) {
+          switch (msg[i]) {
+            case FAN_SPEED_LOW:
+              this->fan_mode = climate::CLIMATE_FAN_LOW;
+              break;
+            case FAN_SPEED_HIGH:
+              this->fan_mode = climate::CLIMATE_FAN_HIGH;
+              break;
+            default:
+              ESP_LOGW(TAG, "Unknown ventilation fan speed: 0x%02X", msg[i]);
+              break;
+          }
         }
         i += len;
-      }
-      switch (fan_mode) {
-        case 0:
-        case 1:
-        case 2:
-        case 3:
-        case 4:
-          this->fan_mode = climate::CLIMATE_FAN_LOW;
-          break;
-        case 5:
-          this->fan_mode = climate::CLIMATE_FAN_HIGH;
-          break;
-        default:
-          break;
       }
       break;
     }

@@ -8,7 +8,10 @@ Builds on the v3.8.x connection-layer rewrite (requires **pymadoka-ng 0.3.10**, 
 
 - **New: ventilation units (VAM / HRV).** Both integrations now support Daikin VAM units — ventilation-only indoor units driven by the same BRC1H controller over the same BLE protocol (operation mode 5 = VENTILATION, no temperature setpoint).
   - **HA integration**: the config flow now asks for the **appliance type** (*thermostat* or *ventilation*). A ventilation device exposes an **Off / Fan only** climate entity with fan-speed control and indoor/outdoor temperature — no target temperature.
-  - **ESPHome**: new dedicated **`madoka_vam`** platform (Off / Fan only, fan LOW/MEDIUM/HIGH/AUTO, current temperature, optional `outdoor_temperature` and `firmware_version`).
+  - **ESPHome**: new dedicated **`madoka_vam`** platform (Off / Fan only, fan LOW/HIGH, current temperature, optional `outdoor_temperature` and `firmware_version`).
+- **Fan speed on a VAM actually works now.** The VAM reports and accepts its airflow on a *different* BLE function from the thermostat: `0x0031` argument `0x21`, not `0x0050`. `0x0050` does answer on a VAM, but every argument comes back empty and none of them ever change, so the fan speed shown in Home Assistant never followed the unit and setting it did nothing. Confirmed live against a VAM350J8VEB and documented in [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md#2-known-functions).
+  - Selecting **Low** no longer sends **High**: a missing `break` made both fan modes fall through to the same value.
+  - The `madoka_vam` component is now built in CI (`esphome/tests/test-vam.yaml`); previously nothing ever compiled it.
 - **Reverse-engineering tooling** to map VAM-specific features later: a `dump_raw` option on `madoka_vam` (hex-logs every BLE frame and any unhandled function ID), a public `send_raw_command()` probe callable from a lambda, and a capture guide at [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md).
 
 ## v3.8.1 - July 2026

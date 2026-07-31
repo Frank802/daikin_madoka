@@ -262,8 +262,12 @@ Each thermostat creates:
 
 For a Daikin VAM (ventilation-only unit), use the dedicated **`madoka_vam`**
 platform instead of `madoka`. It exposes **Off** / **Fan only** modes, a fan
-speed (LOW/MEDIUM/HIGH/AUTO) and the current temperature — a VAM has no
+speed (LOW/HIGH) and the current temperature — a VAM has no
 temperature setpoint.
+
+A VAM reports its airflow on BLE function `0x0031` (argument `0x21`), not on the
+`0x0050` function the thermostat uses; see
+[docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md#2-known-functions).
 
 ```yaml
 external_components:
