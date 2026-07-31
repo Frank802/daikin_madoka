@@ -38,6 +38,7 @@ from .const import (
 )
 from .coordinator import MadokaConfigEntry
 from .entity import MadokaEntity
+from .ventilation import VentilationModeEnum, VentilationStatus
 
 # HVACMode.OFF has no Daikin operation mode on purpose: the BRC1H models
 # "off" as a power state, not a mode. async_set_hvac_mode handles OFF by
@@ -85,6 +86,23 @@ HA_FAN_MODE_TO_DAIKIN = {
 # offering MID or AUTO would give a control that silently does nothing.
 VENTILATION_FAN_MODES = [FAN_LOW, FAN_HIGH]
 
+# How the VAM routes air. It has nothing to do with HVACMode, so it is exposed
+# as the preset instead: on function 0x0031 this is argument 0x20, alongside
+# the fan speed in argument 0x21.
+PRESET_VENTILATION_AUTO = "ventilation_auto"
+PRESET_HEAT_EXCHANGE = "heat_exchange"
+PRESET_BYPASS = "bypass"
+
+HA_PRESET_TO_VENTILATION_MODE = {
+    PRESET_VENTILATION_AUTO: VentilationModeEnum.AUTO,
+    PRESET_HEAT_EXCHANGE: VentilationModeEnum.HEAT_EXCHANGE,
+    PRESET_BYPASS: VentilationModeEnum.BYPASS,
+}
+
+VENTILATION_MODE_TO_HA_PRESET = {
+    mode: preset for preset, mode in HA_PRESET_TO_VENTILATION_MODE.items()
+}
+
 DAIKIN_TO_HA_FAN_MODE = {
     FanSpeedEnum.LOW: FAN_LOW,
     FanSpeedEnum.MID: FAN_MEDIUM,
@@ -118,6 +136,7 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
     """Representation of a Daikin HVAC."""
 
     _attr_name = None
+    _attr_translation_key = "madoka"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     # The BLE frames carry 1/128 degree resolution, but pymadoka-ng's SetPointStatus API is
     # whole-degree only (int setpoints, round() on decode), so a finer step
@@ -162,9 +181,10 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
             | ClimateEntityFeature.TURN_ON
             | ClimateEntityFeature.TURN_OFF
         )
-        # A ventilation (VAM) unit has no temperature setpoint.
+        # A ventilation (VAM) unit has no temperature setpoint. Its ventilation
+        # mode (auto / heat exchange / bypass) rides on the preset instead.
         if self._is_ventilation:
-            return features
+            return features | ClimateEntityFeature.PRESET_MODE
         if self._range_active:
             features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         else:
@@ -344,6 +364,11 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
     @property
     def fan_mode(self) -> str | None:
         """Return the fan setting."""
+        if self._is_ventilation:
+            status = self._ventilation_status
+            if status is None or status.fan_speed is None:
+                return None
+            return DAIKIN_TO_HA_FAN_MODE.get(status.fan_speed)
         if self.controller.fan_speed.status is None:
             return None
         if self.hvac_mode == HVACMode.HEAT:
@@ -356,6 +381,14 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set fan mode."""
+        if self._is_ventilation:
+            await self._async_execute(
+                "set fan mode",
+                lambda: self.controller.ventilation.update(
+                    VentilationStatus(fan_speed=HA_FAN_MODE_TO_DAIKIN.get(fan_mode))
+                ),
+            )
+            return
         await self._async_execute(
             "set fan mode",
             lambda: self.controller.fan_speed.update(
@@ -363,6 +396,49 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
                     HA_FAN_MODE_TO_DAIKIN.get(fan_mode),
                     HA_FAN_MODE_TO_DAIKIN.get(fan_mode),
                 )
+            ),
+        )
+
+    @property
+    def _ventilation_status(self) -> VentilationStatus | None:
+        """Status of function 0x0031, or None on a thermostat."""
+        feature = getattr(self.controller, "ventilation", None)
+        if feature is None:
+            return None
+        return feature.status
+
+    @property
+    def preset_modes(self) -> list[str] | None:
+        """Ventilation modes the VAM reports it supports, in argument 0x12."""
+        if not self._is_ventilation:
+            return None
+        status = self._ventilation_status
+        return [
+            preset
+            for preset, mode in HA_PRESET_TO_VENTILATION_MODE.items()
+            if status is None or status.supports_mode(mode)
+        ]
+
+    @property
+    def preset_mode(self) -> str | None:
+        """Return how the VAM is currently routing air."""
+        status = self._ventilation_status
+        if not self._is_ventilation or status is None:
+            return None
+        mode = status.ventilation_mode
+        if mode is None:
+            return None
+        return VENTILATION_MODE_TO_HA_PRESET.get(mode)
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Set how the VAM routes air."""
+        mode = HA_PRESET_TO_VENTILATION_MODE.get(preset_mode)
+        if not self._is_ventilation or mode is None:
+            return
+        await self._async_execute(
+            "set ventilation mode",
+            lambda: self.controller.ventilation.update(
+                VentilationStatus(ventilation_mode=mode)
             ),
         )
 

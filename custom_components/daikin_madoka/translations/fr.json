@@ -3,7 +3,7 @@
     "device_type": {
       "options": {
         "thermostat": "Thermostat (chauffage / climatisation)",
-        "ventilation": "Ventilation seule (VAM / VMC)"
+        "ventilation": "Ventilation seule (VAM / HRV)"
       }
     }
   },
@@ -70,6 +70,19 @@
     }
   },
   "entity": {
+    "climate": {
+      "madoka": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "ventilation_auto": "Auto",
+              "heat_exchange": "Échangeur de chaleur",
+              "bypass": "Bypass"
+            }
+          }
+        }
+      }
+    },
     "sensor": {
       "indoor_temperature": {
         "name": "Température intérieure"

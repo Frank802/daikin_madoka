@@ -189,8 +189,12 @@ fait que ventiler : mode d'opération `5` (VENTILATION), sans consigne de
 température.
 
 Entités exposées : modes **Off** / **Fan only**, vitesse de ventilation
-(LOW/HIGH), température courante. Options : `outdoor_temperature`
-(capteur), `firmware_version` (text sensor), `dump_raw` (booléen).
+(LOW/HIGH), preset de mode de ventilation (*Auto*, *Heat exchange*, *Bypass*),
+température courante. Options : `outdoor_temperature` (capteur),
+`firmware_version` (text sensor), `dump_raw` (booléen).
+
+La vitesse et le mode de ventilation sont portés par la fonction BLE `0x0031`
+(arguments `0x21` et `0x20`), et non par la fonction `0x0050` du thermostat.
 
 ```yaml
 external_components:

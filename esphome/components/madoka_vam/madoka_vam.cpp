@@ -32,11 +32,24 @@ static const uint16_t CMD_SET_EYE_BRIGHTNESS = 0x4302;
 
 // Argument of CMD_GET_VENTILATION / CMD_SET_VENTILATION holding the airflow.
 static const uint8_t ARG_VENTILATION_FAN_SPEED = 0x21;
+// ...and the one holding how the unit routes that airflow.
+static const uint8_t ARG_VENTILATION_MODE = 0x20;
 // The VAM reuses the Madoka fan speed encoding. Values the unit does not
 // support are ignored silently, so a two-speed VAM simply stays where it was
 // when asked for 0x03.
 static const uint8_t FAN_SPEED_LOW = 0x01;
 static const uint8_t FAN_SPEED_HIGH = 0x05;
+
+// Ventilation mode has no ClimateMode equivalent, so it rides on the custom
+// preset. Values of ARG_VENTILATION_MODE, confirmed by writing 0x4031 and
+// reading the result back.
+static const uint8_t VENTILATION_MODE_AUTO = 0x00;
+static const uint8_t VENTILATION_MODE_HEAT_EXCHANGE = 0x01;
+static const uint8_t VENTILATION_MODE_BYPASS = 0x02;
+
+static const char *const PRESET_VENTILATION_AUTO = "Auto";
+static const char *const PRESET_HEAT_EXCHANGE = "Heat exchange";
+static const char *const PRESET_BYPASS = "Bypass";
 
 void MadokaVam::dump_config() { LOG_CLIMATE(TAG, "Daikin Madoka VAM Climate Controller", this); }
 
@@ -53,7 +66,10 @@ void MadokaEyeBrightnessNumber::control(float value) {
 
 void MadokaResetFilterButton::press_action() { this->parent_->reset_filter(); }
 
-void MadokaVam::setup() { this->receive_semaphore_ = xSemaphoreCreateMutex(); }
+void MadokaVam::setup() {
+  this->receive_semaphore_ = xSemaphoreCreateMutex();
+  this->set_supported_custom_presets({PRESET_VENTILATION_AUTO, PRESET_HEAT_EXCHANGE, PRESET_BYPASS});
+}
 
 void MadokaVam::loop() {
   std::vector<uint8_t> chk = {};
@@ -113,6 +129,25 @@ void MadokaVam::control(const ClimateCall &call) {
     }
     if (fan_speed_out != 255) {
       this->query_(CMD_SET_VENTILATION, std::vector<uint8_t>{ARG_VENTILATION_FAN_SPEED, 0x01, fan_speed_out}, 200);
+    }
+  }
+  if (call.has_custom_preset()) {
+    const StringRef preset = call.get_custom_preset();
+    uint8_t vent_mode_out = 255;
+    if (preset == PRESET_VENTILATION_AUTO) {
+      vent_mode_out = VENTILATION_MODE_AUTO;
+    } else if (preset == PRESET_HEAT_EXCHANGE) {
+      vent_mode_out = VENTILATION_MODE_HEAT_EXCHANGE;
+    } else if (preset == PRESET_BYPASS) {
+      vent_mode_out = VENTILATION_MODE_BYPASS;
+    } else {
+      ESP_LOGW(TAG, "Unsupported ventilation mode: %s", preset.c_str());
+    }
+    // One argument per write on purpose: the unit applies whatever it is sent
+    // and never reports a rejection, so sending a stale fan speed alongside
+    // would quietly overwrite it.
+    if (vent_mode_out != 255) {
+      this->query_(CMD_SET_VENTILATION, std::vector<uint8_t>{ARG_VENTILATION_MODE, 0x01, vent_mode_out}, 200);
     }
   }
   this->should_update_ = true;
@@ -388,6 +423,21 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
               break;
             default:
               ESP_LOGW(TAG, "Unknown ventilation fan speed: 0x%02X", msg[i]);
+              break;
+          }
+        } else if (argument_id == ARG_VENTILATION_MODE && len >= 1) {
+          switch (msg[i]) {
+            case VENTILATION_MODE_AUTO:
+              this->set_custom_preset_(PRESET_VENTILATION_AUTO);
+              break;
+            case VENTILATION_MODE_HEAT_EXCHANGE:
+              this->set_custom_preset_(PRESET_HEAT_EXCHANGE);
+              break;
+            case VENTILATION_MODE_BYPASS:
+              this->set_custom_preset_(PRESET_BYPASS);
+              break;
+            default:
+              ESP_LOGW(TAG, "Unknown ventilation mode: 0x%02X", msg[i]);
               break;
           }
         }

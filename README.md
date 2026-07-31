@@ -60,10 +60,11 @@ Each thermostat creates:
 
 If you set the appliance type to **ventilation**, the `climate.*` entity adapts
 to a VAM (Ventilation Air Management / heat-recovery unit): it exposes **Off** and
-**Fan only** modes and a **fan speed** (no temperature setpoint, since a VAM only
-ventilates). Indoor/outdoor temperature sensors still work. Advanced
-VAM-specific features (bypass/auto ventilation, airflow presets, filter, air
-quality) are not mapped yet — see [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md) to help capture them.
+**Fan only** modes, a **fan speed** (Low/High) and a **preset** selecting how the
+unit routes air — *Auto*, *Heat exchange* or *Bypass*. There is no temperature
+setpoint, since a VAM only ventilates. Indoor/outdoor temperature sensors still
+work. Remaining VAM-specific features (filter, air quality) are not mapped yet —
+see [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md) to help capture them.
 
 ### Requirements
 
@@ -262,11 +263,13 @@ Each thermostat creates:
 
 For a Daikin VAM (ventilation-only unit), use the dedicated **`madoka_vam`**
 platform instead of `madoka`. It exposes **Off** / **Fan only** modes, a fan
-speed (LOW/HIGH) and the current temperature — a VAM has no
+speed (LOW/HIGH), a **preset** for the ventilation mode (*Auto*, *Heat
+exchange*, *Bypass*) and the current temperature — a VAM has no
 temperature setpoint.
 
-A VAM reports its airflow on BLE function `0x0031` (argument `0x21`), not on the
-`0x0050` function the thermostat uses; see
+A VAM reports its airflow on BLE function `0x0031` (argument `0x21`, with the
+ventilation mode alongside in argument `0x20`), not on the `0x0050` function the
+thermostat uses; see
 [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md#2-known-functions).
 
 ```yaml
