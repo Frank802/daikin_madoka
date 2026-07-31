@@ -80,6 +80,11 @@ HA_FAN_MODE_TO_DAIKIN = {
     FAN_AUTO: FanSpeedEnum.AUTO,
 }
 
+# A VAM runs its fan at two speeds only. Asked for anything else it does not
+# answer with an error, it simply ignores the write and stays where it was, so
+# offering MID or AUTO would give a control that silently does nothing.
+VENTILATION_FAN_MODES = [FAN_LOW, FAN_HIGH]
+
 DAIKIN_TO_HA_FAN_MODE = {
     FanSpeedEnum.LOW: FAN_LOW,
     FanSpeedEnum.MID: FAN_MEDIUM,
@@ -122,15 +127,17 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
     _attr_fan_modes = list(HA_FAN_MODE_TO_DAIKIN)
 
     def __init__(self, coordinator, device_type: str = DEFAULT_DEVICE_TYPE) -> None:
-        """Initialize; a ventilation (VAM) unit exposes only OFF + FAN_ONLY."""
+        """Initialize; a VAM exposes only OFF + FAN_ONLY and two fan speeds."""
         super().__init__(coordinator)
         self._is_ventilation = device_type == DEVICE_TYPE_VENTILATION
         if self._is_ventilation:
             self._attr_hvac_modes = VENTILATION_HVAC_MODES
+            self._attr_fan_modes = VENTILATION_FAN_MODES
             self._mode_to_daikin = HA_MODE_TO_DAIKIN_VENTILATION
             self._daikin_to_mode = DAIKIN_TO_HA_MODE_VENTILATION
         else:
             self._attr_hvac_modes = [*HA_MODE_TO_DAIKIN, HVACMode.OFF]
+            self._attr_fan_modes = list(HA_FAN_MODE_TO_DAIKIN)
             self._mode_to_daikin = HA_MODE_TO_DAIKIN
             self._daikin_to_mode = DAIKIN_TO_HA_MODE
 

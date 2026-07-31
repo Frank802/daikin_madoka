@@ -17,8 +17,10 @@ from homeassistant.components.climate import (
 from homeassistant.components.climate.const import (
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
+    FAN_AUTO,
     FAN_HIGH,
     FAN_LOW,
+    FAN_MEDIUM,
 )
 from homeassistant.const import ATTR_TEMPERATURE
 from homeassistant.core import HomeAssistant
@@ -31,6 +33,8 @@ from custom_components.daikin_madoka.climate import (
 )
 from custom_components.daikin_madoka.const import (
     CONF_MAC,
+    DEFAULT_DEVICE_TYPE,
+    DEVICE_TYPE_VENTILATION,
     DOMAIN,
     MAX_TEMP,
     MIN_TEMP,
@@ -84,7 +88,9 @@ def _mock_controller() -> MagicMock:
 
 
 def _entity(
-    hass: HomeAssistant, controller: MagicMock
+    hass: HomeAssistant,
+    controller: MagicMock,
+    device_type: str = DEFAULT_DEVICE_TYPE,
 ) -> DaikinMadokaClimate:
     """Climate entity on a coordinator bound to an entry, boost stubbed out."""
     entry = MockConfigEntry(domain=DOMAIN, data={CONF_MAC: MAC})
@@ -97,7 +103,7 @@ def _entity(
     # Write tests only assert the device command; the refresh boost would
     # schedule timers and re-poll the mocked controller for nothing.
     coordinator.async_boost = AsyncMock()
-    entity = DaikinMadokaClimate(coordinator)
+    entity = DaikinMadokaClimate(coordinator, device_type)
     entity.hass = hass
     return entity
 
@@ -200,6 +206,20 @@ async def test_set_fan_mode_writes_both_speeds(hass: HomeAssistant) -> None:
     status = controller.fan_speed.update.call_args[0][0]
     assert status.cooling_fan_speed is FanSpeedEnum.LOW
     assert status.heating_fan_speed is FanSpeedEnum.LOW
+
+
+async def test_ventilation_offers_two_fan_speeds(hass: HomeAssistant) -> None:
+    """A VAM runs at LOW or HIGH; it ignores a write of anything else."""
+    entity = _entity(hass, _mock_controller(), DEVICE_TYPE_VENTILATION)
+
+    assert entity.fan_modes == [FAN_LOW, FAN_HIGH]
+
+
+async def test_thermostat_keeps_all_fan_speeds(hass: HomeAssistant) -> None:
+    """Restricting the VAM must not narrow a thermostat's fan modes."""
+    entity = _entity(hass, _mock_controller())
+
+    assert entity.fan_modes == [FAN_LOW, FAN_MEDIUM, FAN_HIGH, FAN_AUTO]
 
 
 # --- AUTO range / supported features ---------------------------------------

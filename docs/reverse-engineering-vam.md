@@ -39,11 +39,32 @@ total-length byte. A reassembled message looks like:
 |---|---|---|---|
 | `0x0020` / `0x4020` | get/set | Power (setting status) | `0x20` → on/off (0/1) |
 | `0x0030` / `0x4030` | get/set | Operation mode | `0x20` → mode (**5 = VENTILATION**) |
-| `0x0050` / `0x4050` | get/set | Fan speed | `0x20` cooling slot, `0x21` heating slot (0=AUTO, 1=LOW, 3=MID, 5=HIGH) |
+| `0x0031` / `0x4031` | get/set | **Ventilation** | `0x20` → ventilation mode, `0x21` → fan speed |
+| `0x0050` / `0x4050` | get/set | Fan speed (thermostat only) | `0x20` cooling slot, `0x21` heating slot (0=AUTO, 1=LOW, 3=MID, 5=HIGH) |
 | `0x0110` | get | Sensor information | `0x40` indoor °C, `0x41` outdoor °C |
-| `0x0130` | get | Version | `0x45` RC version, `0x46` BLE version |
+| `0x0130` | get | Version | `0x45` RC version, `0x46` BLE version, `0x40` ASCII model name |
 
-The VAM carries its fan speed in the **`0x20` slot** (there is no heating slot).
+### The VAM does not use `0x0050`
+
+This was confirmed on a VAM350J8VEB (RC 1.10.3 / BLE 5.17) by polling the unit
+while it was driven from its own wall controller. `0x0050` *answers*, but every
+argument comes back with length 0 and **none of them ever change** — the same is
+true of `0x0030`. Airflow lives on `0x0031` instead:
+
+| Argument | Meaning | Values |
+|---|---|---|
+| `0x12` | Supported ventilation modes | Bitmask; `0x07` = modes 0, 1 and 2 supported |
+| `0x20` | **Ventilation mode** | `0` = automatic, `1` = heat exchange, `2` = bypass |
+| `0x21` | **Fan speed** | `1` = LOW, `3` = MID, `5` = HIGH (same encoding as `0x0050`) |
+
+Two useful behaviours of this firmware:
+
+- An **unsupported function ID answers `06:00:<hi>:<lo>:FF:00`** — a 6-byte frame
+  whose only argument is `0xFF` with length 0. Sweeping GET IDs and discarding
+  that sentinel is a quick way to enumerate what a unit really supports.
+- An **out-of-range argument value is ignored silently**, with no error frame.
+  Writing fan speed `0x03` to a two-speed VAM leaves it exactly where it was, so
+  never assume a write succeeded — read the value back.
 
 ## 3. Capturing VAM traffic
 
@@ -127,8 +148,10 @@ functions (`0x40xx`) — they change the unit's state.
 
 Record which of these your VAM supports and the corresponding frames:
 
-- [ ] Ventilation sub-modes (automatic / bypass / heat-exchange / night purge)
-- [ ] Airflow volume presets beyond LOW/MID/HIGH (e.g. numeric m³/h steps)
+- [x] Ventilation sub-modes — `0x0031` arg `0x20`: automatic / heat exchange / bypass.
+      Night purge was not offered by the tested unit.
+- [x] Airflow volume — `0x0031` arg `0x21`, LOW/MID/HIGH. No numeric m³/h steps were
+      found; the tested VAM350J8VEB is two-speed and ignores MID.
 - [ ] Filter status / filter-life counter and its reset command
 - [ ] CO₂, humidity or air-quality sensor readings
 - [ ] Independent supply vs exhaust fan speeds
