@@ -66,6 +66,15 @@ Two useful behaviours of this firmware:
   Writing fan speed `0x03` to a two-speed VAM leaves it exactly where it was, so
   never assume a write succeeded — read the value back.
 
+Both integrations drive `0x0031` directly. The ESPHome `madoka_vam` component
+maps argument `0x21` to the climate fan mode and argument `0x20` to a custom
+preset; the Home Assistant integration ships its own `Ventilation` feature in
+`custom_components/daikin_madoka/ventilation.py`, because pymadoka-ng has no
+class for this function and models fan speed as `0x0050` only. Every write
+carries **one** argument: the unit applies whatever it is sent and never reports
+a rejection, so a stale companion argument would quietly overwrite the value it
+was not meant to touch.
+
 ## 3. Capturing VAM traffic
 
 You need to see what the **official Daikin app** sends/receives while you drive
