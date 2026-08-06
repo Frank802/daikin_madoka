@@ -107,6 +107,11 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
   void set_reset_filter_button(button::Button *button) { this->reset_filter_button_ = button; }
   void set_eye_brightness(uint8_t level);
   void reset_filter();
+  void set_dump_raw(bool dump_raw) { this->dump_raw_ = dump_raw; }
+  // Envoi d'une commande brute (function id + arguments) : utile pour sonder des
+  // fonctions non documentées du VAM depuis une lambda ESPHome. Les réponses
+  // arrivent dans les logs (activer dump_raw pour l'affichage hexadécimal).
+  void send_raw_command(uint16_t cmd, std::vector<uint8_t> args) { this->query_(cmd, std::move(args), 200); }
   float get_setup_priority() const override { return setup_priority::DATA; }
   climate::ClimateTraits traits() override {
     auto traits = climate::ClimateTraits();
