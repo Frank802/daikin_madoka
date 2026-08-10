@@ -12,7 +12,6 @@
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/number/number.h"
-#include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
 #ifdef USE_ESP32
@@ -59,7 +58,6 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
   uint16_t wwr_handle_;
   SemaphoreHandle_t receive_semaphore_ = nullptr;
   Status cur_status_;
-  sensor::Sensor *outdoor_temperature_sensor_{nullptr};
   binary_sensor::BinarySensor *clean_filter_binary_sensor_{nullptr};
   text_sensor::TextSensor *firmware_version_text_sensor_{nullptr};
   number::Number *eye_brightness_number_{nullptr};
@@ -80,7 +78,6 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
                            esp_ble_gattc_cb_param_t *param) override;
   void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
   void dump_config() override;
-  void set_outdoor_temperature_sensor(sensor::Sensor *sensor) { this->outdoor_temperature_sensor_ = sensor; }
   void set_clean_filter_binary_sensor(binary_sensor::BinarySensor *sensor) {
     this->clean_filter_binary_sensor_ = sensor;
   }

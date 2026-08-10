@@ -46,7 +46,7 @@ The poll interval (default 60 s) can be changed from the integration's **Configu
 Each thermostat creates:
 - `climate.*` — thermostat (mode, setpoint, fan speed, current temperature; separate heating/cooling setpoints in AUTO mode when the device has range mode enabled)
 - `sensor.*_indoor_temperature` — indoor temperature
-- `sensor.*_outdoor_temperature` — outdoor temperature
+- `sensor.*_outdoor_temperature` — outdoor temperature (not created for ventilation units, which are indoor-only)
 - `sensor.*_operating_time` — cumulative hours the unit has been running (coarse, poll-interval granularity; persisted across restarts)
 - `sensor.*_signal_strength` — Bluetooth RSSI (diagnostic, disabled by default)
 - `sensor.*_connection_source` — which BLE path serves the thermostat: active proxy while connected, preferred (bonded) proxy otherwise (diagnostic)
@@ -62,8 +62,10 @@ If you set the appliance type to **ventilation**, the `climate.*` entity adapts
 to a VAM (Ventilation Air Management / heat-recovery unit): it exposes **Off** and
 **Fan only** modes, a **fan speed** (Low/High) and a **preset** selecting how the
 unit routes air — *Auto*, *Heat exchange* or *Bypass*. There is no temperature
-setpoint, since a VAM only ventilates. Indoor/outdoor temperature sensors still
-work. Remaining VAM-specific features (filter, air quality) are not mapped yet —
+setpoint, since a VAM only ventilates. The unit is indoor-only, so no outdoor
+temperature sensor is created — the indoor temperature is reported by the
+`climate.*` entity and by `sensor.*_indoor_temperature`. Remaining VAM-specific
+features (filter, air quality) are not mapped yet —
 see [docs/reverse-engineering-vam.md](docs/reverse-engineering-vam.md) to help capture them.
 
 ### Requirements
@@ -299,8 +301,6 @@ climate:
     name: "Ventilation"
     ble_client_id: vam_client
     update_interval: 15s
-    outdoor_temperature:
-      name: "Outdoor Temperature"
     firmware_version:
       name: "Firmware"
     dump_raw: false        # set true to hex-log BLE frames (reverse engineering)

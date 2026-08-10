@@ -201,8 +201,6 @@ script:
 #     name: "Ventilation VAM"
 #     ble_client_id: vam_client
 #     update_interval: 15s
-#     outdoor_temperature:
-#       name: "VAM Temp. Exterieure"
 #     firmware_version:
 #       name: "VAM Firmware"
 #     dump_raw: false  # true = journalise les trames BLE (reverse engineering VAM)

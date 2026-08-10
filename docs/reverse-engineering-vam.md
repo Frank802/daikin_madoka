@@ -6,7 +6,7 @@ by the **same BRC1H remote controller** as a regular Madoka thermostat, over the
 ventilates — its operation mode is `5` (VENTILATION) and it has no
 heating/cooling setpoint.
 
-Basic support (on/off, fan speed, indoor/outdoor temperature) is already
+Basic support (on/off, fan speed, indoor temperature) is already
 implemented in both integrations. This guide is for discovering the
 **VAM-specific features** that are not yet mapped — automatic/bypass ventilation
 modes, airflow presets, filter status, CO₂/humidity sensors, etc.
@@ -41,7 +41,7 @@ total-length byte. A reassembled message looks like:
 | `0x0030` / `0x4030` | get/set | Operation mode | `0x20` → mode (**5 = VENTILATION**) |
 | `0x0031` / `0x4031` | get/set | **Ventilation** | `0x20` → ventilation mode, `0x21` → fan speed |
 | `0x0050` / `0x4050` | get/set | Fan speed (thermostat only) | `0x20` cooling slot, `0x21` heating slot (0=AUTO, 1=LOW, 3=MID, 5=HIGH) |
-| `0x0110` | get | Sensor information | `0x40` indoor °C, `0x41` outdoor °C |
+| `0x0110` | get | Sensor information | `0x40` indoor °C (`0x41`, outdoor °C on a thermostat, is not read: a VAM is indoor-only) |
 | `0x0130` | get | Version | `0x45` RC version, `0x46` BLE version, `0x40` ASCII model name |
 
 ### The VAM does not use `0x0050`

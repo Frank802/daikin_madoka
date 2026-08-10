@@ -6,22 +6,14 @@ from esphome.components import (
     button,
     climate,
     number,
-    sensor,
     text_sensor,
 )
-from esphome.const import (
-    CONF_ID,
-    DEVICE_CLASS_PROBLEM,
-    DEVICE_CLASS_TEMPERATURE,
-    STATE_CLASS_MEASUREMENT,
-    UNIT_CELSIUS,
-)
+from esphome.const import CONF_ID, DEVICE_CLASS_PROBLEM
 
 CODEOWNERS = ["@Frank802"]
 DEPENDENCIES = ["ble_client"]
-AUTO_LOAD = ["binary_sensor", "button", "number", "sensor", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "number", "text_sensor"]
 
-CONF_OUTDOOR_TEMPERATURE = "outdoor_temperature"
 CONF_CLEAN_FILTER = "clean_filter"
 CONF_FIRMWARE_VERSION = "firmware_version"
 CONF_EYE_BRIGHTNESS = "eye_brightness"
@@ -44,12 +36,6 @@ CONFIG_SCHEMA = (
     .extend(cv.polling_component_schema("10s"))
     .extend(
         {
-            cv.Optional(CONF_OUTDOOR_TEMPERATURE): sensor.sensor_schema(
-                unit_of_measurement=UNIT_CELSIUS,
-                accuracy_decimals=0,
-                device_class=DEVICE_CLASS_TEMPERATURE,
-                state_class=STATE_CLASS_MEASUREMENT,
-            ),
             cv.Optional(CONF_CLEAN_FILTER): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
                 icon="mdi:air-filter",
@@ -75,10 +61,6 @@ async def to_code(config):
     await cg.register_component(var, config)
     await climate.register_climate(var, config)
     await ble_client.register_ble_node(var, config)
-
-    if conf := config.get(CONF_OUTDOOR_TEMPERATURE):
-        outdoor_sensor = await sensor.new_sensor(conf)
-        cg.add(var.set_outdoor_temperature_sensor(outdoor_sensor))
 
     if conf := config.get(CONF_CLEAN_FILTER):
         clean_filter_sensor = await binary_sensor.new_binary_sensor(conf)
