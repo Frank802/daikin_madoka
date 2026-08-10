@@ -58,6 +58,7 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
   uint16_t wwr_handle_;
   SemaphoreHandle_t receive_semaphore_ = nullptr;
   Status cur_status_;
+  bool dump_raw_{false};
   binary_sensor::BinarySensor *clean_filter_binary_sensor_{nullptr};
   text_sensor::TextSensor *firmware_version_text_sensor_{nullptr};
   number::Number *eye_brightness_number_{nullptr};
