@@ -96,4 +96,3 @@ async def to_code(config):
     if conf := config.get(CONF_RESET_FILTER):
         reset_button = await button.new_button(conf)
         cg.add(reset_button.set_parent(var))
-        cg.add(var.set_reset_filter_button(reset_button))

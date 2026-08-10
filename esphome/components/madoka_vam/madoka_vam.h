@@ -37,21 +37,6 @@ class MadokaResetFilterButton : public button::Button, public Parented<MadokaVam
   void press_action() override;
 };
 
-struct Setpoint {
-  uint16_t cooling;
-  uint16_t heating;
-};
-
-struct FanSpeed {
-  uint8_t cooling;
-  uint8_t heating;
-};
-
-struct SensorReading {
-  uint8_t indoor;
-  uint8_t outdoor;
-};
-
 struct Status {
   bool status;
   uint8_t mode;
@@ -78,7 +63,6 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
   binary_sensor::BinarySensor *clean_filter_binary_sensor_{nullptr};
   text_sensor::TextSensor *firmware_version_text_sensor_{nullptr};
   number::Number *eye_brightness_number_{nullptr};
-  button::Button *reset_filter_button_{nullptr};
 
   std::vector<std::vector<uint8_t>> split_payload_(std::vector<uint8_t> msg);
   std::vector<uint8_t> prepare_message_(uint16_t cmd, std::vector<uint8_t> args);
@@ -104,7 +88,6 @@ class MadokaVam : public climate::Climate, public esphome::ble_client::BLEClient
     this->firmware_version_text_sensor_ = sensor;
   }
   void set_eye_brightness_number(number::Number *number) { this->eye_brightness_number_ = number; }
-  void set_reset_filter_button(button::Button *button) { this->reset_filter_button_ = button; }
   void set_eye_brightness(uint8_t level);
   void reset_filter();
   void set_dump_raw(bool dump_raw) { this->dump_raw_ = dump_raw; }
