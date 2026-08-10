@@ -5,6 +5,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
+from time import monotonic
 from typing import Any
 
 from pymadoka import ConnectionException, Controller, PairingRequiredError
@@ -19,6 +20,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    AUTH_CORROBORATION_WINDOW_S,
     AUTOMATIC_PAIR_TIMEOUT,
     BOND_EVICTION_FAILURES,
     BRC1H_NAME_PREFIX,
@@ -208,6 +210,17 @@ class MadokaPairingState:
     # accumulate enough evidence to be evicted. Cleared for a source the moment
     # that source authenticates again.
     auth_failures: dict[str, int] = field(default_factory=dict)
+    # monotonic() at the last fully successful poll, or None. The acquittal a
+    # "rejected" verdict is checked against (see AUTH_CORROBORATION_WINDOW_S),
+    # and CONSUMED when it is spent, so one good session excuses exactly one
+    # refusal: a bond that really died still surfaces on the next round rather
+    # than being forgiven for as long as the window happens to stay open.
+    #
+    # Deliberately absent from as_stored(): monotonic timestamps are
+    # process-local, so a restored one would be meaningless arithmetic against
+    # a fresh process's clock — and restoring an acquittal would hand the new
+    # process a free pass no session in it ever earned.
+    last_success: float | None = None
 
     def as_stored(self) -> dict[str, Any] | None:
         """Serialize the durable part of the verdict, or None if it is empty.
@@ -495,6 +508,12 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             raise
         self._pairing.skipped_polls = 0
         self._pairing.fail_count = 0
+        # The device answered over an authenticated link. Stamped here rather
+        # than at connect time on purpose: this is the strongest statement
+        # available — the bond held AND the GATT session worked — and it also
+        # covers a poll over an already-open link, which never goes through the
+        # connect path at all.
+        self._pairing.last_success = monotonic()
         self._clear_issues()
         # Full clear only here: an unload (which also runs _clear_issues via
         # async_shutdown_extras) must NOT lift the suspension, or a simple
@@ -819,6 +838,13 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         makes eviction reachable at all in a home with three or four proxies,
         where a round is never single-path.
 
+        Since 0.3.11 those sources are also REAL. Before it, they were the
+        candidates the library offered to HA, which is not what HA connects
+        through: habluetooth keeps only the address and re-picks a scanner by
+        RSSI, so a refusal could be charged to a proxy that was never in the
+        round (#53). An attempt whose path cannot be proven is now keyed under
+        None and charges nobody.
+
         Without that verdict (pymadoka <= 0.3.9) tried_sources is a flat list:
         a round over three proxies cannot say WHICH of them rejected, so only
         a single-source round is unambiguous and anything else records
@@ -833,18 +859,25 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
     def _attributable_refusals(self, err: PairingRequiredError) -> list[str]:
         """The sources this error PROVES hold no bond, if any."""
         evidence = getattr(err, "evidence", None)
-        if isinstance(evidence, Mapping):
+        if isinstance(evidence, Mapping) and evidence:
+            # A mapping that exists is AUTHORITATIVE, including when it names
+            # nobody. Since pymadoka-ng 0.3.11 an attempt whose path could not
+            # be proven — no link was ever established, so nothing named the
+            # scanner — is keyed under None, so "no proven source" is a
+            # statement ("this round cannot say which proxy failed"), not
+            # silence. Falling through to the legacy rule here would answer it
+            # with a guess, and the guess is the whole defect: under HA the
+            # candidate we offered is not the path that was used (#53).
+            #
             # Only "rejected" counts: a per-path "timeout" is congestion until
             # proven otherwise, exactly as a whole-round timeout streak is.
-            proven = [
+            return [
                 source
                 for source, verdict in evidence.items()
                 if verdict == "rejected" and source
             ]
-            if proven:
-                return proven
-            # An empty/verdict-less mapping says nothing; fall through to the
-            # legacy rule rather than treating silence as exoneration.
+        # No mapping at all: pymadoka <= 0.3.9, where tried_sources is a flat
+        # list and only a single-source round is unambiguous.
         if len(err.tried_sources) != 1 or not err.tried_sources[0]:
             return []
         return [err.tried_sources[0]]
@@ -1075,6 +1108,21 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
             proven_rejection = (
                 isinstance(rounds, int) and not isinstance(rounds, bool) and rounds == 0
             )
+        if proven_rejection and self._async_spend_acquittal():
+            # Contradicted by our own evidence. Fall through to the timeout
+            # tier: still slowed down, still reported, but nothing convicted
+            # and no human summoned to the thermostat.
+            _LOGGER.warning(
+                "%s reported a refused bond, but it completed an authenticated "
+                "session less than %ss ago (tried via: %s) — treating this as "
+                "congestion and slowing reconnects to %ss instead of asking for "
+                "a re-pair; a repeat will be taken at face value",
+                self.address,
+                AUTH_CORROBORATION_WINDOW_S,
+                self._proxy_names(err.tried_sources),
+                TIMEOUT_BACKOFF_INTERVAL_S,
+            )
+            proven_rejection = False
         if proven_rejection:
             self._note_pairing_failure(err)
             self._async_evict_dead_bond(err)
@@ -1092,6 +1140,22 @@ class MadokaCoordinator(DataUpdateCoordinator[dict]):
         # SPENT (see _async_enter_timeout_backoff), and reading the counter
         # here would only copy a value the library has already zeroed.
         self._async_enter_timeout_backoff(err)
+
+    @callback
+    def _async_spend_acquittal(self) -> bool:
+        """Does a fresh authenticated session refute this refusal? Spend it if so.
+
+        Consumed whether or not the caller ends up needing it again, which is
+        what bounds the forgiveness to one refusal per proven-good session. The
+        alternative — leaving the stamp in place — makes the outcome depend on
+        whether TIMEOUT_BACKOFF_INTERVAL_S happens to exceed the window, and a
+        genuinely dead bond could be excused twice over on that accident.
+        """
+        last = self._pairing.last_success
+        if last is None or monotonic() - last > AUTH_CORROBORATION_WINDOW_S:
+            return False
+        self._pairing.last_success = None
+        return True
 
     @callback
     def _async_start_reauth(self) -> None:
