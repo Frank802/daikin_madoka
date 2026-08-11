@@ -449,14 +449,10 @@ void MadokaVam::parse_cb_(std::vector<uint8_t> msg) {
       while (i < message_size) {
         uint8_t argument_id = msg[i++];
         uint8_t len = msg[i++];
-        if (argument_id == 0x40) {
-          std::vector<uint8_t> val(msg.begin() + i, msg.begin() + i + len);
-          this->current_temperature = val[0];
-        } else if (argument_id == 0x41 && this->outdoor_temperature_sensor_ != nullptr && len >= 1) {
-          uint8_t value = msg[i];
-          if (value != 0xFF) {
-            this->outdoor_temperature_sensor_->publish_state(value);
-          }
+        // Only argument 0x40 (indoor temperature) is read: a VAM is an
+        // indoor-only unit, it has no outdoor probe behind argument 0x41.
+        if (argument_id == 0x40 && len >= 1) {
+          this->current_temperature = msg[i];
         }
         i += len;
       }

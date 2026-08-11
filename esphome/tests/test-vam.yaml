@@ -34,8 +34,6 @@ climate:
     name: "Madoka VAM"
     ble_client_id: madoka_vam_test
     update_interval: 15s
-    outdoor_temperature:
-      name: "VAM Outdoor Temperature"
     clean_filter:
       name: "VAM Clean Filter"
     firmware_version:

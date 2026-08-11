@@ -24,7 +24,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import ATTR_TEMPERATURE
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 from custom_components.daikin_madoka.climate import (
     DAIKIN_TO_HA_MODE,
@@ -269,6 +269,30 @@ async def test_ventilation_fan_mode_is_unknown_without_a_status(
     entity = _entity(hass, controller, DEVICE_TYPE_VENTILATION)
 
     assert entity.fan_mode is None
+
+
+async def test_ventilation_fan_mode_ignores_a_speed_it_does_not_offer(
+    hass: HomeAssistant,
+) -> None:
+    """Reporting a mode outside fan_modes makes HA log an invalid state."""
+    controller = _mock_ventilation_controller(fan_speed=FanSpeedEnum.MID)
+    entity = _entity(hass, controller, DEVICE_TYPE_VENTILATION)
+
+    assert entity.fan_mode is None
+
+
+async def test_ventilation_set_hvac_mode_rejects_an_unsupported_mode(
+    hass: HomeAssistant,
+) -> None:
+    """A mode with no Daikin equivalent must fail, not write a null mode."""
+    controller = _mock_ventilation_controller()
+    entity = _entity(hass, controller, DEVICE_TYPE_VENTILATION)
+
+    with pytest.raises(ServiceValidationError):
+        await entity.async_set_hvac_mode(HVACMode.HEAT)
+
+    controller.operation_mode.update.assert_not_called()
+    controller.power_state.update.assert_not_called()
 
 
 async def test_ventilation_set_fan_mode_writes_only_the_speed(

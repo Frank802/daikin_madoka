@@ -27,6 +27,7 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
@@ -63,9 +64,10 @@ DAIKIN_TO_HA_MODE = {
 # A VAM (ventilation-only) unit reports/accepts operation mode VENTILATION and
 # exposes just OFF + FAN_ONLY. FAN_ONLY must map to VENTILATION here (not FAN, as
 # a thermostat does), which is why the write mapping is per-device-type.
+# As with HA_MODE_TO_DAIKIN, HVACMode.OFF is deliberately absent: it is a power
+# state, not an operation mode.
 HA_MODE_TO_DAIKIN_VENTILATION = {
     HVACMode.FAN_ONLY: OperationModeEnum.VENTILATION,
-    HVACMode.OFF: OperationModeEnum.VENTILATION,
 }
 
 DAIKIN_TO_HA_MODE_VENTILATION = {
@@ -349,9 +351,14 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
         """
         calls = []
         if hvac_mode != HVACMode.OFF:
+            daikin_mode = self._mode_to_daikin.get(hvac_mode)
+            if daikin_mode is None:
+                raise ServiceValidationError(
+                    f"HVAC mode {hvac_mode} is not supported by this device"
+                )
             calls.append(
                 lambda: self.controller.operation_mode.update(
-                    OperationModeStatus(self._mode_to_daikin.get(hvac_mode))
+                    OperationModeStatus(daikin_mode)
                 )
             )
         calls.append(
@@ -368,7 +375,12 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
             status = self._ventilation_status
             if status is None or status.fan_speed is None:
                 return None
-            return DAIKIN_TO_HA_FAN_MODE.get(status.fan_speed)
+            mode = DAIKIN_TO_HA_FAN_MODE.get(status.fan_speed)
+            # A VAM only advertises two speeds: never report one it does not
+            # offer, HA logs an invalid state for a mode outside fan_modes.
+            if mode not in self._attr_fan_modes:
+                return None
+            return mode
         if self.controller.fan_speed.status is None:
             return None
         if self.hvac_mode == HVACMode.HEAT:

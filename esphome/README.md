@@ -190,8 +190,9 @@ température.
 
 Entités exposées : modes **Off** / **Fan only**, vitesse de ventilation
 (LOW/HIGH), preset de mode de ventilation (*Auto*, *Heat exchange*, *Bypass*),
-température courante. Options : `outdoor_temperature` (capteur),
-`firmware_version` (text sensor), `dump_raw` (booléen).
+température courante. Le VAM est une unité intérieure : il n'expose pas de
+capteur de température extérieure. Options : `firmware_version` (text sensor),
+`dump_raw` (booléen).
 
 La vitesse et le mode de ventilation sont portés par la fonction BLE `0x0031`
 (arguments `0x21` et `0x20`), et non par la fonction `0x0050` du thermostat.
@@ -221,8 +222,6 @@ climate:
     name: "Ventilation VAM"
     ble_client_id: vam_client
     update_interval: 15s
-    outdoor_temperature:
-      name: "VAM Temp. Exterieure"
     firmware_version:
       name: "VAM Firmware"
     dump_raw: false  # passez à true pour journaliser les trames BLE (reverse engineering)
