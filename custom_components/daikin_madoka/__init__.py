@@ -8,10 +8,12 @@ from homeassistant.const import CONF_DEVICES, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_BONDED_SOURCES,
     CONF_DEVICE_TYPE,
+    CONF_ENABLE_ENERGY,
     CONF_FRIENDLY_NAME,
     CONF_MAC,
     CONF_PREFERRED_SOURCE,
@@ -68,6 +70,29 @@ def _async_purge_orphan_devices(hass: HomeAssistant) -> None:
         dev_reg.async_remove_device(device.id)
 
 
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Serve the bundled Lovelace card as soon as the component loads.
+
+    Deliberately here and not in ``async_setup_entry``. The card is referenced
+    by a dashboard resource URL that HA's frontend requests on every page load,
+    while a config entry only finishes setting up once the Bluetooth stack is
+    up and the thermostats have been given their chance to answer -- seconds
+    later, and not at all when every entry fails. Registering the static path
+    from the entry therefore left a window, right after a restart, in which the
+    URL returned 404: the browser parsed the error page as a module, the custom
+    element was never defined, and the card rendered as "custom element doesn't
+    exist: madoka-card" until that page was reloaded by hand.
+
+    Opening a dashboard immediately after restarting Home Assistant is exactly
+    how someone lands in that window, which is why the failure looked random.
+
+    This runs when the component is imported, before any entry, and the http
+    and frontend components it needs are already declared as dependencies.
+    """
+    await async_register_card(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bool:
     """Set up Madoka thermostat(s) from a config entry.
 
@@ -86,8 +111,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
     # every entry setup is fine.
     _async_purge_orphan_devices(hass)
 
-    await async_register_card(hass)
-
     # Before any coordinator exists: what the integration concluded about this
     # device's bond before the last restart drives the very first connect
     # attempt (candidate restriction, poll cadence, quarantine).
@@ -101,6 +124,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
         single_device = False
 
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    energy_enabled = entry.options.get(CONF_ENABLE_ENERGY, False)
 
     coordinators: dict[str, MadokaCoordinator] = {}
     for raw_mac, friendly_name in devices:
@@ -111,6 +135,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
         # without an entry reload. Legacy multi-MAC entries share one entry,
         # so a single preferred_source cannot be right for all of them: they
         # get plain RSSI ordering instead.
+        def _allowed_sources_for(mac):
+            """Proxies this device may PAIR through; None means unrestricted.
+
+            The single definition of the restriction, shared by both callbacks
+            below so they can never drift apart — and they must not: one picks
+            what we OFFER, the other vetoes what HA actually CHOSE, and a
+            device whose two answers disagree would either pair where it must
+            not or refuse to pair anywhere.
+
+            Raises freely; each caller wraps it with the failure mode that is
+            safe for it (see below).
+            """
+            # Legacy multi-MAC entries share one entry, so no per-device bond
+            # list can be right for all of them.
+            if not single_device:
+                return None
+            # A user standing at the thermostat is deliberately pairing a new
+            # proxy — the only way one ever enters CONF_BONDED_SOURCES.
+            if async_pairing_state(hass, mac).pairing_window:
+                return None
+            preferred = entry.data.get(CONF_PREFERRED_SOURCE)
+            return entry.data.get(CONF_BONDED_SOURCES) or (
+                [preferred] if preferred else None
+            )
+
+        def _allowed_sources(mac=mac):
+            """Veto handed to pymadoka, applied to the path HA really used.
+
+            Fails OPEN, which is the exact opposite of _candidates below, and
+            deliberately so: this callback can only ever REMOVE a pairing
+            opportunity. If it breaks, the worst outcome of ignoring it is the
+            pre-existing behaviour (a possible pairing prompt); the worst
+            outcome of honouring a broken answer is a thermostat that may
+            never pair through any proxy again.
+            """
+            try:
+                return _allowed_sources_for(mac)
+            except Exception:
+                _LOGGER.exception(
+                    "Could not determine the bonded proxies for %s; leaving "
+                    "the pairing restriction off for this attempt",
+                    mac,
+                )
+                return None
+
         def _candidates(mac=mac):
             # TOTAL BY CONTRACT: this callback must never raise. pymadoka
             # catches an exception here and silently falls back to
@@ -130,12 +199,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
                 # jams the thermostat. A user-opened pairing window lifts the
                 # restriction, and so does having no bond on record yet (fresh
                 # install), where an unrestricted first connect is the only way in.
-                allowed = None
-                if single_device and not async_pairing_state(hass, mac).pairing_window:
-                    allowed = entry.data.get(CONF_BONDED_SOURCES) or (
-                        [preferred] if preferred else None
-                    )
-                return build_candidates(hass, mac, preferred, allowed_sources=allowed)
+                #
+                # Necessary but NOT sufficient: HA keeps only the address of
+                # the BLEDevice we return here and re-scores every path at
+                # connect time, so this ordering is advisory. The binding half
+                # is _allowed_sources above, checked against the path actually
+                # used.
+                return build_candidates(
+                    hass, mac, preferred,
+                    allowed_sources=_allowed_sources_for(mac),
+                )
             except Exception:  # see the contract above
                 # Fail CLOSED, with an empty list. The library reports that as
                 # DeviceUnreachableError, which surfaces as an ordinary failed
@@ -161,6 +234,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
             name=friendly_name,
             reconnect=False,
             candidates_callback=_candidates,
+            allowed_sources_callback=_allowed_sources,
         )
         # pymadoka-ng knows nothing about function 0x0031, so a VAM gets the
         # feature attached here. Controller.update() walks vars(self) and
@@ -172,7 +246,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MadokaConfigEntry) -> bo
         ):
             controller.ventilation = Ventilation(controller.connection)
         coordinator = MadokaCoordinator(
-            hass, controller, scan_interval, friendly_name=friendly_name
+            hass,
+            controller,
+            scan_interval,
+            friendly_name=friendly_name,
+            energy_enabled=energy_enabled,
         )
 
         try:
@@ -240,8 +318,10 @@ async def _async_update_listener(
     update_interval here used to silently disarm an active timeout backoff.
     """
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    energy_enabled = entry.options.get(CONF_ENABLE_ENERGY, False)
     for coordinator in entry.runtime_data.values():
         coordinator.async_apply_scan_interval(scan_interval)
+        coordinator.async_apply_energy_enabled(energy_enabled)
 
 
 async def async_unload_entry(
