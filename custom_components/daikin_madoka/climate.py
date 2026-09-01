@@ -470,9 +470,15 @@ class DaikinMadokaClimate(MadokaEntity, ClimateEntity):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set how the VAM routes air."""
+        if not self._is_ventilation:
+            raise ServiceValidationError(
+                "Presets are only available on a ventilation unit"
+            )
         mode = HA_PRESET_TO_VENTILATION_MODE.get(preset_mode)
-        if not self._is_ventilation or mode is None:
-            return
+        if mode is None:
+            raise ServiceValidationError(
+                f"Preset mode {preset_mode} is not supported by this device"
+            )
         await self._async_execute(
             "set ventilation mode",
             lambda: self.controller.ventilation.update(

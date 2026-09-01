@@ -352,13 +352,24 @@ async def test_ventilation_set_preset_writes_only_the_mode(
     assert status.fan_speed is None
 
 
-async def test_ventilation_ignores_an_unknown_preset(hass: HomeAssistant) -> None:
+async def test_ventilation_rejects_an_unknown_preset(hass: HomeAssistant) -> None:
+    """An unusable preset raises rather than doing nothing in silence."""
     controller = _mock_ventilation_controller()
     entity = _entity(hass, controller, DEVICE_TYPE_VENTILATION)
 
-    await entity.async_set_preset_mode("turbo")
+    with pytest.raises(ServiceValidationError):
+        await entity.async_set_preset_mode("turbo")
 
     controller.ventilation.update.assert_not_called()
+
+
+async def test_thermostat_rejects_a_preset(hass: HomeAssistant) -> None:
+    """A thermostat has no presets at all, so any of them is a service error."""
+    controller = _mock_controller()
+    entity = _entity(hass, controller)
+
+    with pytest.raises(ServiceValidationError):
+        await entity.async_set_preset_mode("auto")
 
 
 async def test_thermostat_has_no_preset(hass: HomeAssistant) -> None:
